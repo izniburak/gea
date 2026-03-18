@@ -41,13 +41,10 @@ body {
   gap: 16px;
 }
 
-.eyebrow {
-  margin: 0 0 12px;
-  color: #38bdf8;
-  font-size: 0.85rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+.logo {
+  width: 100%;
+  height: auto;
+  margin-bottom: 8px;
 }
 
 h1 {

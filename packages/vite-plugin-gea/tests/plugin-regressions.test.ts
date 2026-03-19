@@ -1698,3 +1698,258 @@ test('generated observer and buildProps methods include early-return guard from 
     'buildProps method must include a null guard for issue',
   )
 })
+
+test('early-return guard in __buildProps re-derives template-local variable from store', () => {
+  const output = transformComponentSource(`
+    import { Component } from '@geajs/core'
+    import projectStore from './project-store'
+    import Icon from './Icon.jsx'
+
+    export default class ProjectSettings extends Component {
+      template() {
+        const project = projectStore.project
+
+        if (!project) return <div>Loading...</div>
+
+        return (
+          <div>
+            <Icon type={project.icon} size={20} />
+          </div>
+        )
+      }
+    }
+  `)
+
+  const buildPropsMatch = output.match(/__buildProps_\w+\([^)]*\)\s*\{[\s\S]*?\n  \}/)
+  assert.ok(buildPropsMatch, '__buildProps method should be generated')
+
+  const body = buildPropsMatch![0]
+  assert.match(
+    body,
+    /const project = projectStore\.project/,
+    'buildProps must re-derive the template-local variable before the guard',
+  )
+  assert.match(body, /if \(!project\)/, 'buildProps must include the null guard using the local variable')
+
+  const deriveLine = body.indexOf('const project')
+  const guardLine = body.indexOf('if (!project)')
+  assert.ok(deriveLine < guardLine, 'variable derivation must come before the guard that uses it')
+})
+
+test('early-return guard works with destructured store variables in __buildProps', () => {
+  const output = transformComponentSource(`
+    import { Component } from '@geajs/core'
+    import projectStore from './project-store'
+    import Icon from './Icon.jsx'
+
+    export default class ProjectSettings extends Component {
+      template() {
+        const { project } = projectStore
+
+        if (!project) return <div>Loading...</div>
+
+        return (
+          <div>
+            <Icon type={project.icon} size={20} />
+          </div>
+        )
+      }
+    }
+  `)
+
+  const buildPropsMatch = output.match(/__buildProps_\w+\([^)]*\)\s*\{[\s\S]*?\n  \}/)
+  assert.ok(buildPropsMatch, '__buildProps method should be generated')
+
+  const body = buildPropsMatch![0]
+  assert.match(
+    body,
+    /const \{\s*project\s*\} = projectStore/,
+    'buildProps must re-derive the destructured variable before the guard',
+  )
+  assert.match(body, /if \(!project\)/, 'buildProps must include the null guard')
+})
+
+test('__itemProps_* re-derives template-local variable used in .map() child props', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gea-itemprops-guard-'))
+
+  try {
+    const componentPath = join(dir, 'Board.jsx')
+    const storePath = join(dir, 'project-store.ts')
+
+    await writeFile(
+      storePath,
+      `import { Store } from '@geajs/core'
+export default class ProjectStore extends Store {
+  project = null as any
+}`,
+    )
+
+    const output = await transformWithPlugin(
+      `
+        import { Component } from '@geajs/core'
+        import projectStore from './project-store'
+        import BoardColumn from './BoardColumn.jsx'
+
+        const statusList = [{ id: 'backlog' }, { id: 'todo' }, { id: 'in-progress' }]
+
+        export default class Board extends Component {
+          template() {
+            const project = projectStore.project
+
+            if (!project) return <div>Loading...</div>
+
+            return (
+              <div>
+                {statusList.map(col => (
+                  <BoardColumn key={col.id} status={col.id} issues={project.issues} />
+                ))}
+              </div>
+            )
+          }
+        }
+      `,
+      componentPath,
+    )
+
+    assert.ok(output)
+
+    const itemPropsMatch = output.match(/__itemProps_\w+\([^)]*\)\s*\{[\s\S]*?\n  \}/)
+    assert.ok(itemPropsMatch, '__itemProps method should be generated')
+
+    const body = itemPropsMatch![0]
+    assert.match(
+      body,
+      /const project = projectStore\.project/,
+      '__itemProps must re-derive template-local variable before referencing it',
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('__buildProps_* omits early-return guard when props do not reference guard variable', () => {
+  const output = transformComponentSource(`
+    import { Component } from '@geajs/core'
+    import projectStore from './project-store'
+    import Icon from './Icon.jsx'
+
+    export default class ProjectSettings extends Component {
+      template() {
+        const project = projectStore.project
+
+        if (!project) return <div>Loading...</div>
+
+        return (
+          <div>
+            <span>{project.name}</span>
+            <Icon type="settings" size={20} />
+          </div>
+        )
+      }
+    }
+  `)
+
+  const buildPropsMatch = output.match(/__buildProps_\w+\([^)]*\)\s*\{[\s\S]*?\n  \}/)
+  assert.ok(buildPropsMatch, '__buildProps method should be generated')
+
+  const body = buildPropsMatch![0]
+  assert.doesNotMatch(
+    body,
+    /if \(!project\)/,
+    'guard must NOT be injected when props are static and do not reference the guard variable',
+  )
+  assert.match(body, /type: "settings"/, 'static props should always be returned')
+})
+
+test('observer calls __refreshChildProps when guard-dependent props reference the store', () => {
+  const output = transformComponentSource(`
+    import { Component } from '@geajs/core'
+    import projectStore from './project-store'
+    import Icon from './Icon.jsx'
+
+    export default class ProjectSettings extends Component {
+      template() {
+        const project = projectStore.project
+
+        if (!project) return <div>Loading...</div>
+
+        return (
+          <div>
+            <Icon type={project.icon} size={20} />
+          </div>
+        )
+      }
+    }
+  `)
+
+  const observerMatch = output.match(/__observe_projectStore_project\([^)]*\)\s*\{[\s\S]*?\n  \}/)
+  assert.ok(observerMatch, 'observer for projectStore.project should be generated')
+
+  assert.match(
+    observerMatch![0],
+    /__refreshChildProps_icon/,
+    'observer must call __refreshChildProps_icon to update the child when the guard dependency changes',
+  )
+})
+
+test('component inside .map() with HTML wrapper compiles correctly', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gea-map-html-wrap-'))
+
+  try {
+    const componentPath = join(dir, 'Board.jsx')
+    const storePath = join(dir, 'project-store.ts')
+    const filtersStorePath = join(dir, 'filters-store.ts')
+
+    await writeFile(
+      storePath,
+      `import { Store } from '@geajs/core'\nexport default class ProjectStore extends Store {\n  project = null as any\n}`,
+    )
+    await writeFile(
+      filtersStorePath,
+      `import { Store } from '@geajs/core'\nexport default class FiltersStore extends Store {\n  userIds = [] as string[]\n  toggleUserId(id: string) {}\n}`,
+    )
+
+    const output = await transformWithPlugin(
+      `
+        import { Component } from '@geajs/core'
+        import projectStore from './project-store'
+        import filtersStore from './filters-store'
+        import Avatar from './Avatar.jsx'
+
+        export default class Board extends Component {
+          template() {
+            const project = projectStore.project
+            if (!project) return <div></div>
+
+            return (
+              <div>
+                <div class="avatars">
+                  {project.users.map((user: any) => (
+                    <div
+                      key={user.id}
+                      class={\`avatar \${filtersStore.userIds.includes(user.id) ? 'active' : ''}\`}
+                      click={() => filtersStore.toggleUserId(user.id)}
+                    >
+                      <Avatar avatarUrl={user.avatarUrl} name={user.name} size={32} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
+          }
+        }
+      `,
+      componentPath,
+    )
+
+    assert.ok(output, 'should produce compiled output')
+
+    assert.match(
+      output,
+      /new Avatar/,
+      'Avatar inside .map() HTML wrapper must be instantiated as a component, not rendered as an HTML tag',
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

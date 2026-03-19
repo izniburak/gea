@@ -486,6 +486,20 @@ export function applyStaticReactivity(
               }
 
               const propNames = getTemplatePropNames(classPath.node.body)
+              const tmplBody = templateMethod?.body.body ?? []
+              let tmplReturnIdx = -1
+              for (let ri = tmplBody.length - 1; ri >= 0; ri--) {
+                if (t.isReturnStatement(tmplBody[ri])) {
+                  tmplReturnIdx = ri
+                  break
+                }
+              }
+              const tmplSetupCtx = templateMethod
+                ? {
+                    params: templateMethod.params,
+                    statements: tmplReturnIdx >= 0 ? tmplBody.slice(0, tmplReturnIdx) : [],
+                  }
+                : undefined
               const methods = generateComponentArrayMethods(
                 um,
                 arrayPropName,
@@ -494,6 +508,7 @@ export function applyStaticReactivity(
                 classPath.node.body,
                 storeArrayAccess,
                 getTemplateParamIdentifier(classPath.node.body),
+                tmplSetupCtx,
               )
               if (methods.length > 0 && templateMethod) {
                 methods.forEach((method) => classPath.node.body.body.push(method))

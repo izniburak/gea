@@ -45,6 +45,7 @@
     "test:coverage": "c8 --reporter=text --reporter=lcov tsx --test tests/**/*.test.ts"
   },
   "dependencies": {
+    "@acemir/cssom": "^0.9.31",
     "@babel/generator": "^7.23.0",
     "@babel/parser": "^7.23.0",
     "@babel/traverse": "^7.23.0",

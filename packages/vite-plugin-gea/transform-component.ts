@@ -232,7 +232,8 @@ export function transformComponentFile(
           }
         }
 
-        const earlyReturnGuards = (returnIndex >= 0 ? body.slice(0, returnIndex) : []).filter(
+        const preReturnStmts = returnIndex >= 0 ? body.slice(0, returnIndex) : []
+        const earlyReturnGuards = preReturnStmts.filter(
           (s): s is t.IfStatement =>
             t.isIfStatement(s) &&
             (t.isReturnStatement(s.consequent) ||
@@ -240,11 +241,47 @@ export function transformComponentFile(
             true),
         )
 
+        let guardSetupStatements: t.Statement[] = []
+        if (earlyReturnGuards.length > 0) {
+          const guardIdents = new Set<string>()
+          for (const guard of earlyReturnGuards) {
+            const walk = (node: t.Node) => {
+              if (t.isIdentifier(node)) guardIdents.add(node.name)
+              for (const key of t.VISITOR_KEYS[node.type] || []) {
+                const child = (node as any)[key]
+                if (Array.isArray(child)) child.forEach((c: any) => c?.type && walk(c))
+                else if (child?.type) walk(child)
+              }
+            }
+            walk(guard.test)
+          }
+
+          const declBindsGuardIdent = (pattern: t.LVal): boolean => {
+            if (t.isIdentifier(pattern)) return guardIdents.has(pattern.name)
+            if (t.isObjectPattern(pattern))
+              return pattern.properties.some((p) =>
+                t.isRestElement(p)
+                  ? declBindsGuardIdent(p.argument)
+                  : declBindsGuardIdent((p as t.ObjectProperty).value as t.LVal),
+              )
+            if (t.isArrayPattern(pattern)) return pattern.elements.some((e) => e && declBindsGuardIdent(e))
+            return false
+          }
+
+          guardSetupStatements = preReturnStmts.filter((s) => {
+            if (!t.isVariableDeclaration(s)) return false
+            return s.declarations.some((d) => declBindsGuardIdent(d.id as t.LVal))
+          })
+        }
+
         const allChildren = Array.from(componentInstances.values()).flat()
         for (const child of allChildren) {
           const mappings = directMappingsMap.get(child.instanceVar)
           if (mappings) child.directMappings = mappings
-          if (earlyReturnGuards.length > 0) child.earlyReturnGuards = earlyReturnGuards
+          if (earlyReturnGuards.length > 0) {
+            child.earlyReturnGuards = earlyReturnGuards
+            child.guardSetupStatements = guardSetupStatements
+          }
         }
 
         injectChildComponents(ast, componentInstances, directForwardingSet)

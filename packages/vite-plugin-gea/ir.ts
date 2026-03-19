@@ -106,6 +106,7 @@ export interface ChildComponent {
   dependencies: ObserveDependency[]
   setupStatements?: t.Statement[]
   earlyReturnGuards?: t.IfStatement[]
+  guardSetupStatements?: t.Statement[]
   lazy?: boolean
   directMappings?: { parentPropName: string; childPropName: string }[]
   /** DFS traversal index — used to order constructor instantiation (leaves before parents) */

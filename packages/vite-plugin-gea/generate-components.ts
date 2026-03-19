@@ -190,24 +190,41 @@ function collectTestIdentifiers(node: t.Node): Set<string> {
 }
 
 function buildPropsBuilderMethod(child: ChildComponent): t.ClassMethod {
-  const setupStmts: t.Statement[] = (child.setupStatements || []).map(
-    (statement) => t.cloneNode(statement, true) as t.Statement,
-  )
+  const propsStmtClones = (child.setupStatements || []).map((statement) => t.cloneNode(statement, true) as t.Statement)
   const returnStmt = t.returnStatement(t.cloneNode(child.propsExpression, true))
-  const prunedSetup = pruneUnusedSetupDestructuring(setupStmts, [returnStmt])
 
-  if (child.earlyReturnGuards?.length) {
-    for (const guard of child.earlyReturnGuards) {
-      const guardStmt = t.ifStatement(t.cloneNode(guard.test, true), t.returnStatement(t.objectExpression([])))
-      const testRefs = collectTestIdentifiers(guard.test)
-      let insertIndex = 0
-      for (let i = 0; i < prunedSetup.length; i++) {
-        if (collectBindingNames(prunedSetup[i]).some((name) => testRefs.has(name))) {
-          insertIndex = i + 1
-        }
+  const propsIdentifiers = collectTestIdentifiers(returnStmt)
+  for (const stmt of propsStmtClones) {
+    for (const name of collectTestIdentifiers(stmt)) propsIdentifiers.add(name)
+  }
+
+  const relevantGuards = (child.earlyReturnGuards || []).filter((guard) => {
+    const testRefs = collectTestIdentifiers(guard.test)
+    return [...testRefs].some((name) => propsIdentifiers.has(name))
+  })
+
+  const existingBindings = new Set(propsStmtClones.flatMap(collectBindingNames))
+  const guardStmtClones =
+    relevantGuards.length > 0
+      ? (child.guardSetupStatements || [])
+          .filter((s) => !collectBindingNames(s).every((n) => existingBindings.has(n)))
+          .map((s) => t.cloneNode(s, true) as t.Statement)
+      : []
+  const setupStmts = [...guardStmtClones, ...propsStmtClones]
+
+  const guardNodes: t.Node[] = relevantGuards.map((g) => g.test)
+  const prunedSetup = pruneUnusedSetupDestructuring(setupStmts, [returnStmt, ...guardNodes])
+
+  for (const guard of relevantGuards) {
+    const guardStmt = t.ifStatement(t.cloneNode(guard.test, true), t.returnStatement(t.objectExpression([])))
+    const testRefs = collectTestIdentifiers(guard.test)
+    let insertIndex = 0
+    for (let i = 0; i < prunedSetup.length; i++) {
+      if (collectBindingNames(prunedSetup[i]).some((name) => testRefs.has(name))) {
+        insertIndex = i + 1
       }
-      prunedSetup.splice(insertIndex, 0, guardStmt)
     }
+    prunedSetup.splice(insertIndex, 0, guardStmt)
   }
 
   return appendToBody(jsMethod`${id(getPropsBuilderMethodName(child))}() {}`, ...prunedSetup, returnStmt)

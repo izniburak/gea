@@ -6,7 +6,8 @@ import * as t from '@babel/types'
 import { id, jsBlockBody, jsExpr, jsMethod } from 'eszter'
 import type { NodePath } from '@babel/traverse'
 import type { UnresolvedMapInfo } from './ir.ts'
-import { buildComponentPropsExpression } from './transform-attributes.ts'
+import { buildComponentPropsExpression, collectTemplateSetupStatements } from './transform-attributes.ts'
+import type { TemplateSetupContext } from './transform-attributes.ts'
 import { transformJSXExpression, transformJSXFragmentToTemplate } from './transform-jsx.ts'
 import { getJSXTagName, isComponentTag, pruneUnusedSetupDestructuring } from './utils.ts'
 import { replacePropRefsInExpression, replacePropRefsInStatements } from './utils.ts'
@@ -52,6 +53,7 @@ export function generateComponentArrayMethods(
   _classBody: t.ClassBody,
   storeArrayAccess?: { storeVar: string; propName: string },
   wholeParamName?: string,
+  templateSetupContext?: TemplateSetupContext,
 ): t.ClassMethod[] {
   const comp = isUnresolvedMapWithComponentChild(um, imports)
   if (!comp) return []
@@ -78,7 +80,7 @@ export function generateComponentArrayMethods(
     new Map(),
     undefined,
     undefined,
-    undefined,
+    templateSetupContext,
     transformExpr,
     transformFrag,
   )
@@ -150,8 +152,9 @@ export function generateComponentArrayMethods(
     t.identifier('opt'),
   ])
 
+  const itemPropsSetup = collectTemplateSetupStatements(finalPropsExpr, templateSetupContext)
   const itemPropsMethod = jsMethod`${id(itemPropsMethodName)}(opt) {}`
-  itemPropsMethod.body.body.push(t.returnStatement(finalPropsExpr))
+  itemPropsMethod.body.body.push(...itemPropsSetup, t.returnStatement(finalPropsExpr))
 
   const buildMethod = jsMethod`${id(buildMethodName)}() {}`
   buildMethod.body.body.push(

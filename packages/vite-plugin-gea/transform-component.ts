@@ -279,6 +279,8 @@ export function transformComponentFile(
       preTransformAnalysis,
     ) || transformed
 
+  transformRemainingJSX(ast, imports)
+
   return transformed
 }
 

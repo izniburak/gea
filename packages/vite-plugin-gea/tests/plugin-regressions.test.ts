@@ -1577,19 +1577,37 @@ test('render prop arrow functions containing JSX are compiled to template litera
     }
   `)
 
-  assert.doesNotMatch(
-    output,
-    /<Avatar/,
-    'JSX inside render prop must be compiled — raw <Avatar> tag should not appear',
-  )
-  assert.match(
-    output,
-    /new Avatar\(/,
-    'render prop must instantiate the component with new Avatar(...)',
-  )
+  assert.doesNotMatch(output, /<Avatar/, 'JSX inside render prop must be compiled — raw <Avatar> tag should not appear')
+  assert.match(output, /new Avatar\(/, 'render prop must instantiate the component with new Avatar(...)')
   assert.doesNotMatch(
     output,
     /`<avatar[^`]*<\/avatar>`/,
     'render prop must not produce a dead <avatar> custom element HTML string',
+  )
+})
+
+test('&& guarded .map() with components does not leave raw JSX in compiled output', () => {
+  const output = transformComponentSource(`
+    import { Component } from '@geajs/core'
+    import store from './todo-store'
+    import CommentItem from './CommentItem.jsx'
+
+    export default class IssueDetails extends Component {
+      template() {
+        return (
+          <div>
+            {store.todos && store.todos.map((c) => (
+              <CommentItem key={c.id} body={c.text} />
+            ))}
+          </div>
+        )
+      }
+    }
+  `)
+
+  assert.doesNotMatch(
+    output,
+    /<CommentItem/,
+    'raw JSX <CommentItem> must not appear anywhere in compiled output',
   )
 })

@@ -452,4 +452,32 @@ describe('GeaRouter', () => {
     assert.equal(router.page, null)
     router.dispose()
   })
+
+  // Router created without routes still reads the initial URL
+  it('router without routes reads initial URL from window.location', async () => {
+    restoreDom()
+    restoreDom = installDom('http://localhost/some/deep/route?q=1#section')
+    const { GeaRouter } = await loadModules()
+
+    const router = new GeaRouter()
+    assert.equal(router.path, '/some/deep/route', 'path should reflect window.location.pathname')
+    assert.equal(router.hash, '#section', 'hash should reflect window.location.hash')
+    assert.deepEqual(router.query, { q: '1' }, 'query should reflect window.location.search')
+    router.dispose()
+  })
+
+  it('navigate() is an alias for push()', async () => {
+    const { GeaRouter } = await loadModules()
+
+    const routes = {
+      '/': Home as any,
+      '/about': About as any,
+    }
+    const router = new GeaRouter(routes)
+    router.navigate('/about')
+
+    assert.equal(router.path, '/about')
+    assert.equal(router.page, About)
+    router.dispose()
+  })
 })

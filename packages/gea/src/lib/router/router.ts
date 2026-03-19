@@ -125,6 +125,10 @@ export class Router<T extends RouteMap = RouteMap> extends Store {
     this._navigate(target, 'push')
   }
 
+  navigate(target: string | NavigationTarget): void {
+    this.push(target)
+  }
+
   replace(target: string | NavigationTarget): void {
     this._navigate(target, 'replace')
   }

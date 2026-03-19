@@ -1553,14 +1553,43 @@ test('component class getters that access stores create observers for underlying
     }
   `)
 
-  assert.match(
+  assert.match(output, /routeStore\.__store/, 'compiler must observe routeStore when a component getter accesses it')
+  assert.match(output, /observe\(.*path/, 'observer must be registered for the underlying store path the getter reads')
+})
+
+test('render prop arrow functions containing JSX are compiled to template literals', () => {
+  const output = transformComponentSource(`
+    import { Component } from '@geajs/core'
+    import MySelect from './MySelect.jsx'
+    import Avatar from './Avatar.jsx'
+
+    export default class UserPicker extends Component {
+      template() {
+        return (
+          <div>
+            <MySelect
+              options={['a', 'b']}
+              renderOption={(opt) => <Avatar name={opt} />}
+            />
+          </div>
+        )
+      }
+    }
+  `)
+
+  assert.doesNotMatch(
     output,
-    /routeStore\.__store/,
-    'compiler must observe routeStore when a component getter accesses it',
+    /<Avatar/,
+    'JSX inside render prop must be compiled — raw <Avatar> tag should not appear',
   )
   assert.match(
     output,
-    /observe\(.*path/,
-    'observer must be registered for the underlying store path the getter reads',
+    /new Avatar\(/,
+    'render prop must instantiate the component with new Avatar(...)',
+  )
+  assert.doesNotMatch(
+    output,
+    /`<avatar[^`]*<\/avatar>`/,
+    'render prop must not produce a dead <avatar> custom element HTML string',
   )
 })

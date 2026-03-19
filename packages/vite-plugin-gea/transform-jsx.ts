@@ -582,6 +582,28 @@ function processElement(node: t.JSXElement, parts: TemplatePart[], ctx: Ctx, ele
     }
   }
 
+  if (isComp && !ctx.inMapCallback) {
+    const propsEntries: t.ObjectProperty[] = []
+    for (const attr of node.openingElement.attributes) {
+      if (!t.isJSXAttribute(attr) || !t.isJSXIdentifier(attr.name)) continue
+      const name = attr.name.name
+      if (name === 'key') continue
+      let value: t.Expression
+      if (attr.value === null) value = t.booleanLiteral(true)
+      else if (t.isStringLiteral(attr.value)) value = attr.value
+      else if (t.isJSXExpressionContainer(attr.value) && !t.isJSXEmptyExpression(attr.value.expression))
+        value = attr.value.expression as t.Expression
+      else continue
+      propsEntries.push(t.objectProperty(t.identifier(name), value))
+    }
+    pushString(parts, '')
+    parts.push({
+      type: 'expression',
+      value: t.newExpression(t.identifier(tagName!), [t.objectExpression(propsEntries)]),
+    })
+    return
+  }
+
   const effectiveTag = isComp ? pascalToKebabCase(tagName!) : tagName
   const propContext = getPropContext(ctx.templateSetupContext?.params)
   const rootClassSelector = elementPath.length === 0 ? getRootClassSelector(node) : null

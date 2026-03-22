@@ -1,7 +1,7 @@
 import * as t from '@babel/types'
 import { appendToBody, id, js, jsBlockBody, jsExpr, jsMethod } from 'eszter'
 import type { ArrayMapBinding, ConditionalMapBinding, RelationalMapBinding } from './ir.ts'
-import { buildMemberChain, normalizePathParts, pathPartsToString } from './utils.ts'
+import { buildMemberChain, normalizePathParts, pathPartsToString, isComponentTag, getJSXTagName } from './utils.ts'
 import { collectPatchEntries } from './generate-array-patch.ts'
 import type { NodePath } from '@babel/traverse'
 import { createRequire } from 'module'
@@ -398,6 +398,13 @@ export function generateEnsureArrayConfigsMethod(arrayMaps: ArrayMapBinding[]): 
 
     if (propPatchers) {
       properties.push(t.objectProperty(t.identifier('propPatchers'), propPatchers))
+    }
+
+    // Detect if the map item template root is a component (PascalCase tag)
+    const rootIsComponent = t.isJSXElement(arrayMap.itemTemplate) &&
+      isComponentTag(getJSXTagName(arrayMap.itemTemplate.openingElement.name))
+    if (rootIsComponent) {
+      properties.push(t.objectProperty(t.identifier('hasComponentItems'), t.booleanLiteral(true)))
     }
 
     return t.ifStatement(

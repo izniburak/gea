@@ -2,7 +2,7 @@ import * as t from '@babel/types'
 import { appendToBody, id, js, jsMethod } from 'eszter'
 import type { NodePath } from '@babel/traverse'
 import type { ArrayMapBinding } from './ir.ts'
-import { normalizePathParts, pathPartsToString, replacePropRefsInExpression } from './utils.ts'
+import { normalizePathParts, pathPartsToString, replacePropRefsInExpression, isComponentTag, getJSXTagName, camelToKebab } from './utils.ts'
 import { ITEM_IS_KEY } from './analyze-helpers.ts'
 import { createRequire } from 'module'
 
@@ -88,12 +88,16 @@ export function collectPatchEntries(arrayMap: ArrayMapBinding): PatchPlan {
   const entries: PatchEntry[] = []
   const requiresRerender = templateRequiresRerender(tempFile)
   if (t.isJSXElement(modified)) {
-    walkJSXForPatch(modified, [], entries)
+    const rootTagName = getJSXTagName(modified.openingElement.name)
+    const rootIsComponent = isComponentTag(rootTagName)
+    walkJSXForPatch(modified, [], entries, rootIsComponent)
   }
   return { entries, requiresRerender }
 }
 
-function walkJSXForPatch(node: t.JSXElement, path: number[], entries: PatchEntry[]): void {
+function walkJSXForPatch(node: t.JSXElement, path: number[], entries: PatchEntry[], rootIsComponent = false): void {
+  const isRootLevel = path.length === 0 && rootIsComponent
+
   for (const attr of node.openingElement.attributes) {
     if (!t.isJSXAttribute(attr) || !t.isJSXIdentifier(attr.name)) continue
     const name = attr.name.name
@@ -113,7 +117,7 @@ function walkJSXForPatch(node: t.JSXElement, path: number[], entries: PatchEntry
         childPath: [...path],
         type: 'attribute',
         expression: t.cloneNode(attr.value.expression as t.Expression, true),
-        attributeName: name,
+        attributeName: isRootLevel ? `data-prop-${camelToKebab(name)}` : name,
       })
     }
   }
@@ -253,6 +257,11 @@ export function generateCreateItemMethod(
   const renderMethodName = `render${capName}Item`
   const containerProp = `__${arrayPath.replace(/\./g, '_')}_container`
   const itemIdProperty = arrayMap.itemIdProperty
+
+  // Detect if the map item template root is a component (PascalCase tag)
+  const itemTemplateRootIsComponent = t.isJSXElement(arrayMap.itemTemplate) &&
+    isComponentTag(getJSXTagName(arrayMap.itemTemplate.openingElement.name))
+
   let { entries, requiresRerender } = collectPatchEntries(arrayMap)
 
   if (arrayMap.callbackBodyStatements?.length) {
@@ -311,8 +320,7 @@ export function generateCreateItemMethod(
     if (arrayMap.indexVariable) createMethod.params.push(t.identifier('__idx'))
     const renderArgs: t.Expression[] = [t.identifier('item')]
     if (arrayMap.indexVariable) renderArgs.push(t.identifier('__idx'))
-    return appendToBody(
-      createMethod,
+    const rerenderBody: t.Statement[] = [
       js`var __tw = this.${id(containerProp)}.cloneNode(false);`,
       t.expressionStatement(
         t.assignmentExpression(
@@ -322,8 +330,84 @@ export function generateCreateItemMethod(
         ),
       ),
       js`var el = __tw.firstElementChild;`,
-      t.returnStatement(t.identifier('el')),
-    )
+    ]
+
+    // For component-root map items, set __geaProps with actual JS values
+    if (itemTemplateRootIsComponent && t.isJSXElement(arrayMap.itemTemplate)) {
+      const propsProperties: t.ObjectProperty[] = []
+      const cloned = t.cloneNode(arrayMap.itemTemplate, true) as t.JSXElement
+      for (const attr of cloned.openingElement.attributes) {
+        if (!t.isJSXAttribute(attr) || !t.isJSXIdentifier(attr.name)) continue
+        const propName = attr.name.name
+        if (propName === 'key' || EVENT_NAMES.has(propName)) continue
+        if (!t.isJSXExpressionContainer(attr.value) || t.isJSXEmptyExpression(attr.value.expression)) continue
+        const exprClone = t.cloneNode(attr.value.expression as t.Expression, true)
+        const tempProg = t.file(t.program([t.expressionStatement(exprClone)]))
+        traverse(tempProg, {
+          Identifier(path: NodePath<t.Identifier>) {
+            if (path.node.name === arrayMap.itemVariable) path.node.name = 'item'
+            else if (arrayMap.indexVariable && path.node.name === arrayMap.indexVariable) path.node.name = '__idx'
+          },
+        })
+        const rewrittenExpr = (tempProg.program.body[0] as t.ExpressionStatement).expression
+        propsProperties.push(t.objectProperty(t.identifier(propName), rewrittenExpr))
+      }
+      if (propsProperties.length > 0) {
+        // Include template setup statements if __geaProps references template-local variables
+        if (templateSetupContext && templateSetupContext.statements.length > 0) {
+          const setupVarNames = new Set<string>()
+          for (const stmt of templateSetupContext.statements) {
+            if (t.isVariableDeclaration(stmt)) {
+              for (const decl of stmt.declarations) {
+                if (t.isIdentifier(decl.id)) setupVarNames.add(decl.id.name)
+                else if (t.isObjectPattern(decl.id)) {
+                  for (const prop of decl.id.properties) {
+                    if (t.isObjectProperty(prop) && t.isIdentifier(prop.value)) setupVarNames.add(prop.value.name)
+                    else if (t.isRestElement(prop) && t.isIdentifier(prop.argument)) setupVarNames.add(prop.argument.name)
+                  }
+                }
+              }
+            }
+          }
+          const propsRefsFreeVars = new Set<string>()
+          for (const prop of propsProperties) {
+            traverse(t.expressionStatement(t.cloneNode(prop.value as t.Expression, true)), {
+              noScope: true,
+              Identifier(p: NodePath<t.Identifier>) {
+                if (t.isMemberExpression(p.parent) && p.parent.property === p.node && !p.parent.computed) return
+                propsRefsFreeVars.add(p.node.name)
+              },
+            })
+          }
+          let needsSetup = false
+          for (const name of setupVarNames) {
+            if (propsRefsFreeVars.has(name)) { needsSetup = true; break }
+          }
+          if (needsSetup) {
+            const propRefsNames = propNames ?? new Set<string>()
+            for (const stmt of templateSetupContext.statements) {
+              let clonedStmt = t.cloneNode(stmt, true) as t.Statement
+              if (propRefsNames.size > 0 || wholeParamName) {
+                clonedStmt = replacePropRefsInExpression(clonedStmt as any, propRefsNames, wholeParamName) as any as t.Statement
+              }
+              rerenderBody.push(clonedStmt)
+            }
+          }
+        }
+        rerenderBody.push(
+          t.expressionStatement(
+            t.assignmentExpression(
+              '=',
+              t.memberExpression(t.identifier('el'), t.identifier('__geaProps')),
+              t.objectExpression(propsProperties),
+            ),
+          ),
+        )
+      }
+    }
+
+    rerenderBody.push(t.returnStatement(t.identifier('el')))
+    return appendToBody(createMethod, ...rerenderBody)
   }
 
   if (entries.length === 0) return null
@@ -572,6 +656,48 @@ export function generateCreateItemMethod(
       t.assignmentExpression('=', t.memberExpression(elVar, t.identifier('__geaItem')), t.identifier('item')),
     ),
   )
+
+  // For component-root map items, set __geaProps with actual JS values
+  // so extractComponentProps_ can use them instead of stringified HTML attributes
+  if (itemTemplateRootIsComponent && t.isJSXElement(arrayMap.itemTemplate)) {
+    const propsProperties: t.ObjectProperty[] = []
+    const cloned = t.cloneNode(arrayMap.itemTemplate, true) as t.JSXElement
+    for (const attr of cloned.openingElement.attributes) {
+      if (!t.isJSXAttribute(attr) || !t.isJSXIdentifier(attr.name)) continue
+      const name = attr.name.name
+      if (name === 'key' || EVENT_NAMES.has(name)) continue
+      if (!t.isJSXExpressionContainer(attr.value) || t.isJSXEmptyExpression(attr.value.expression)) continue
+      // Rewrite itemVariable references to 'item'
+      const exprClone = t.cloneNode(attr.value.expression as t.Expression, true)
+      const tempProg = t.file(t.program([t.expressionStatement(exprClone)]))
+      traverse(tempProg, {
+        Identifier(path: NodePath<t.Identifier>) {
+          if (path.node.name === arrayMap.itemVariable) path.node.name = 'item'
+          else if (arrayMap.indexVariable && path.node.name === arrayMap.indexVariable) path.node.name = '__idx'
+        },
+      })
+      let rewrittenExpr = (tempProg.program.body[0] as t.ExpressionStatement).expression
+      if (propNames.size > 0 || wholeParamName) {
+        rewrittenExpr = replacePropRefsInExpression(
+          t.cloneNode(rewrittenExpr, true) as t.Expression,
+          propNames,
+          wholeParamName,
+        )
+      }
+      propsProperties.push(t.objectProperty(t.identifier(name), rewrittenExpr))
+    }
+    if (propsProperties.length > 0) {
+      body.push(
+        t.expressionStatement(
+          t.assignmentExpression(
+            '=',
+            t.memberExpression(elVar, t.identifier('__geaProps')),
+            t.objectExpression(propsProperties),
+          ),
+        ),
+      )
+    }
+  }
 
   body.push(t.returnStatement(elVar))
 

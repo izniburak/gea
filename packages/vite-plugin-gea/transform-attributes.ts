@@ -37,7 +37,7 @@ export function buildComponentPropsExpression(
     else if (t.isJSXExpressionContainer(attr.value) && !t.isJSXEmptyExpression(attr.value.expression)) {
       const expr = attr.value.expression as t.Expression
       propValue = transformExpression(expr)
-      if (propValue && /^on[A-Z]/.test(propName) && t.isMemberExpression(propValue)) {
+      if (propValue && (/^on[A-Z]/.test(propName) || /^(click|input|change|submit|focus|blur|keydown|keyup|keypress|mousedown|mouseup|mouseover|mouseout|mouseenter|mouseleave|touchstart|touchend|touchmove|pointerdown|pointerup|pointermove|scroll|resize|drag|dragstart|dragend|dragover|drop|reset)$/.test(propName)) && t.isMemberExpression(propValue)) {
         const argsId = t.identifier('args')
         propValue = t.arrowFunctionExpression(
           [t.restElement(argsId)],
@@ -46,7 +46,10 @@ export function buildComponentPropsExpression(
       }
     }
 
-    if (propValue) props.push(t.objectProperty(t.identifier(propName), propValue))
+    if (propValue) {
+      const key = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(propName) ? t.identifier(propName) : t.stringLiteral(propName)
+      props.push(t.objectProperty(key, propValue))
+    }
   })
 
   const meaningfulChildren = jsxElement.children.filter((c) => !(t.isJSXText(c) && c.value.trim() === ''))
@@ -149,6 +152,10 @@ function collectExpressionDependenciesInto(
           addDependency([], resolved.storeVar)
           return
         }
+        // Store has reactiveFields — strip the method name and observe the object
+        const methodStripped = resolved.parts.slice(0, -1)
+        addDependency(methodStripped.length > 0 ? methodStripped : [], resolved.storeVar)
+        return
       }
 
       const parts =

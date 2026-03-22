@@ -854,6 +854,11 @@ export function applyStaticReactivity(
           const stateChildObserveKeys = new Set(
             (analysis.stateChildSlots || []).flatMap((slot) => slot.dependencies || []).map((dep) => dep.observeKey),
           )
+          for (const dep of (analysis.stateChildSlots || []).flatMap((slot) => slot.dependencies || [])) {
+            if (!stateProps.has(dep.observeKey)) {
+              stateProps.set(dep.observeKey, dep.pathParts)
+            }
+          }
           const conditionalSlotObserveIndices = new Map<string, number[]>()
           const addCondSlotIndex = (observeKey: string, slotIndex: number) => {
             const indices = conditionalSlotObserveIndices.get(observeKey) || []
@@ -1114,18 +1119,18 @@ export function applyStaticReactivity(
 
             if (arrayHandled) continue
             if (isNestedArrayPath) continue
-            if (analysis.arrayMaps.length > 0 && !guardStateKeys.has(observeKey)) continue
-            if (unresolvedMapKeys.has(observeKey)) continue
-
             if (stateChildObserveKeys.has(observeKey)) {
               mergeObserveMethod(observeKey, generateStateChildSwapObserver(propPath, storeVar))
+              continue
             }
+
+            if (analysis.arrayMaps.length > 0 && !guardStateKeys.has(observeKey)) continue
+            if (unresolvedMapKeys.has(observeKey)) continue
 
             const handledByComponentArray = storeComponentArrayObservers.some(
               (obs) => obs.storeVar === storeVar && pathPartsToString(obs.pathParts) === pathPartsToString(propPath),
             )
             if (handledByComponentArray) continue
-            if (stateChildObserveKeys.has(observeKey)) continue
 
             if (!childObserveGroups.has(observeKey)) {
               if (conditionalSlotIndices.length > 0) continue
@@ -1678,8 +1683,9 @@ function generateUnresolvedRelationalObserver(
       ),
     ]),
     ...jsBlockBody`
-      for (var __i = 0; __i < ${containerRef}.children.length && __i < __arr.length; __i++) {
-        var __child = ${containerRef}.children[__i];
+      var __items = ${containerRef}.querySelectorAll('[data-gea-item-id]');
+      for (var __i = 0; __i < __items.length && __i < __arr.length; __i++) {
+        var __child = __items[__i];
         if (${itemComparison} === value) {
           __child.classList.${id(relBinding.matchWhenEqual ? 'add' : 'remove')}(${t.stringLiteral(relBinding.classToggleName)});
         } else {
@@ -2550,7 +2556,13 @@ function replaceInlineMapWithRenderCall(
           t.isTemplateLiteral(arrowFn.body.body[0].argument))
       if (!hasTemplateLiteralBody) return
 
-      const paramName = t.isIdentifier(arrowFn.params[0]) ? arrowFn.params[0].name : 'item'
+      let paramName: string
+      if (t.isIdentifier(arrowFn.params[0])) {
+        paramName = arrowFn.params[0].name
+      } else {
+        paramName = '__item'
+        arrowFn.params[0] = t.identifier(paramName)
+      }
       const indexParamName = t.isIdentifier(arrowFn.params[1]) ? arrowFn.params[1].name : undefined
 
       const renderArgs: t.Expression[] = [t.identifier(paramName)]
@@ -2598,7 +2610,13 @@ function replaceMapInConditionalSlots(
             return
           const arrowFn = path.node.arguments[0]
           if (!t.isArrowFunctionExpression(arrowFn)) return
-          const paramName = t.isIdentifier(arrowFn.params[0]) ? arrowFn.params[0].name : 'item'
+          let paramName: string
+          if (t.isIdentifier(arrowFn.params[0])) {
+            paramName = arrowFn.params[0].name
+          } else {
+            paramName = '__item'
+            arrowFn.params[0] = t.identifier(paramName)
+          }
           const indexParamName = t.isIdentifier(arrowFn.params[1]) ? arrowFn.params[1].name : undefined
           const renderArgs: t.Expression[] = [t.identifier(paramName)]
           if (indexParamName) renderArgs.push(t.identifier(indexParamName))

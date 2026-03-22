@@ -64,10 +64,7 @@ function ensureMapItemHelper(
       )
     }
     const base = ctx.isImportedState
-      ? t.memberExpression(
-          t.memberExpression(t.thisExpression(), t.identifier('__stores')),
-          t.identifier(ctx.storeVar || 'store'),
-        )
+      ? t.identifier(ctx.storeVar || 'store')
       : t.thisExpression()
     if (ctx.arrayPathParts.length === 0) return base
     const [, ...rest] = ctx.arrayPathParts

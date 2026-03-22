@@ -2881,3 +2881,328 @@ test('HMR runtime skips accessor properties during state snapshot', () => {
     'HMR runtime should skip properties with get/set descriptors',
   )
 })
+
+// --- Component-root map item regression tests ---
+
+test('component-root map items use data-prop-* attributes in template output', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gea-comp-map-'))
+  try {
+    const componentPath = join(dir, 'App.jsx')
+    const output = await transformWithPlugin(
+      `
+import ConversationItem from './ConversationItem'
+import store from './store'
+
+export default class App {
+  template() {
+    return (
+      <div>
+        {store.conversations.map((conv) => (
+          <ConversationItem
+            key={conv.id}
+            id={conv.id}
+            name={conv.name}
+            lastMessage={conv.lastMessage}
+          />
+        ))}
+      </div>
+    )
+  }
+}
+      `,
+      componentPath,
+    )
+    assert.ok(output, 'should produce compiled output')
+
+    // Template should use data-prop-* attribute names (not raw prop names)
+    assert.match(output!, /data-prop-id/, 'template should use data-prop-id')
+    assert.match(output!, /data-prop-name/, 'template should use data-prop-name')
+    assert.match(output!, /data-prop-last-message/, 'template should use data-prop-last-message (kebab-case)')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('generateCreateItemMethod uses data-prop-* for component-root map items', async () => {
+  const babelParser = await import('@babel/parser')
+  const jsxCode = `<ConversationItem key={conv.id} id={conv.id} name={conv.name} lastMessage={conv.lastMessage} />`
+  const ast = babelParser.parseExpression(jsxCode, { plugins: ['jsx'] })
+
+  const arrayMap: ArrayMapBinding = {
+    itemTemplate: ast as t.JSXElement,
+    itemVariable: 'conv',
+    itemIdProperty: 'id',
+    arrayPathParts: ['conversations'],
+    itemBindings: [],
+    storeVar: 'store',
+    key: 'conversations',
+  }
+
+  const method = generateCreateItemMethod(arrayMap)
+  assert.ok(method, 'should generate createItem method')
+
+  const code = generate(method!).code
+  // Should use data-prop-* attribute names
+  assert.match(code, /data-prop-id/, 'createItem should use data-prop-id')
+  assert.match(code, /data-prop-name/, 'createItem should use data-prop-name')
+  assert.match(code, /data-prop-last-message/, 'createItem should use data-prop-last-message')
+  // Should NOT use raw attribute names
+  assert.doesNotMatch(code, /setAttribute\("name"/, 'should not use raw "name" attribute')
+  assert.doesNotMatch(code, /setAttribute\("lastMessage"/, 'should not use raw "lastMessage" attribute')
+  // Should set __geaProps with actual JS values
+  assert.match(code, /__geaProps/, 'should set __geaProps on element')
+  assert.match(code, /id:\s*item\.id/, '__geaProps should include id prop')
+  assert.match(code, /name:\s*item\.name/, '__geaProps should include name prop')
+  assert.match(code, /lastMessage:\s*item\.lastMessage/, '__geaProps should include lastMessage prop')
+})
+
+test('generateCreateItemMethod sets __geaProps with object props for component-root items', async () => {
+  const babelParser = await import('@babel/parser')
+  const jsxCode = `<MessageBubble key={msg.id} message={msg} />`
+  const ast = babelParser.parseExpression(jsxCode, { plugins: ['jsx'] })
+
+  const arrayMap: ArrayMapBinding = {
+    itemTemplate: ast as t.JSXElement,
+    itemVariable: 'msg',
+    itemIdProperty: 'id',
+    arrayPathParts: ['messages'],
+    itemBindings: [],
+    storeVar: 'store',
+    key: 'messages',
+  }
+
+  const method = generateCreateItemMethod(arrayMap)
+  assert.ok(method, 'should generate createItem method')
+
+  const code = generate(method!).code
+  // __geaProps should pass the entire item as the message prop
+  assert.match(code, /__geaProps/, 'should set __geaProps on element')
+  assert.match(code, /message:\s*item/, '__geaProps should pass item as message prop')
+})
+
+test('generateCreateItemMethod does NOT set __geaProps for non-component map items', async () => {
+  const babelParser = await import('@babel/parser')
+  const jsxCode = `<div key={item.id} title={item.title}>{item.text}</div>`
+  const ast = babelParser.parseExpression(jsxCode, { plugins: ['jsx'] })
+
+  const arrayMap: ArrayMapBinding = {
+    itemTemplate: ast as t.JSXElement,
+    itemVariable: 'item',
+    itemIdProperty: 'id',
+    arrayPathParts: ['items'],
+    itemBindings: [],
+    storeVar: 'store',
+    key: 'items',
+  }
+
+  const method = generateCreateItemMethod(arrayMap)
+  assert.ok(method, 'should generate createItem method')
+
+  const code = generate(method!).code
+  // HTML elements should use raw attribute names
+  assert.doesNotMatch(code, /data-prop-/, 'HTML elements should not use data-prop-*')
+  assert.doesNotMatch(code, /__geaProps/, 'HTML elements should not set __geaProps')
+})
+
+test('generateEnsureArrayConfigsMethod sets hasComponentItems for component-root maps', async () => {
+  const babelParser = await import('@babel/parser')
+  const jsxCode = `<TodoItem key={todo.id} title={todo.title} done={todo.done} />`
+  const ast = babelParser.parseExpression(jsxCode, { plugins: ['jsx'] })
+
+  const arrayMap: ArrayMapBinding = {
+    itemTemplate: ast as t.JSXElement,
+    itemVariable: 'todo',
+    itemIdProperty: 'id',
+    arrayPathParts: ['todos'],
+    itemBindings: [],
+    storeVar: 'store',
+    key: 'todos',
+  }
+
+  const method = generateEnsureArrayConfigsMethod([arrayMap])
+  assert.ok(method, 'should generate __ensureArrayConfigs method')
+
+  const code = generate(method!).code
+  assert.match(code, /hasComponentItems:\s*true/, 'config should include hasComponentItems: true')
+})
+
+test('generateEnsureArrayConfigsMethod does NOT set hasComponentItems for non-component maps', async () => {
+  const babelParser = await import('@babel/parser')
+  const jsxCode = `<div key={item.id} title={item.title}>{item.text}</div>`
+  const ast = babelParser.parseExpression(jsxCode, { plugins: ['jsx'] })
+
+  const arrayMap: ArrayMapBinding = {
+    itemTemplate: ast as t.JSXElement,
+    itemVariable: 'item',
+    itemIdProperty: 'id',
+    arrayPathParts: ['items'],
+    itemBindings: [],
+    storeVar: 'store',
+    key: 'items',
+  }
+
+  const method = generateEnsureArrayConfigsMethod([arrayMap])
+  assert.ok(method, 'should generate __ensureArrayConfigs method')
+
+  const code = generate(method!).code
+  assert.doesNotMatch(code, /hasComponentItems/, 'config should NOT include hasComponentItems')
+})
+
+test('method call on store field observes the field, not the method', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gea-method-obs-'))
+  try {
+    // Write a minimal store file so the compiler can analyze reactive fields
+    const storePath = join(dir, 'store.ts')
+    await writeFile(
+      storePath,
+      `
+import { Store } from '@geajs/core'
+class MyStore extends Store {
+  draft = ''
+  setDraft(e) { this.draft = e.target.value }
+}
+export default new MyStore()
+      `.trim(),
+    )
+
+    const componentPath = join(dir, 'App.jsx')
+    const output = await transformWithPlugin(
+      `
+import { Component } from '@geajs/core'
+import store from './store'
+
+export default class App extends Component {
+  template() {
+    return (
+      <div>
+        <button disabled={!store.draft.trim()}>Send</button>
+      </div>
+    )
+  }
+}
+      `,
+      componentPath,
+    )
+    assert.ok(output, 'should produce compiled output')
+
+    // The compiled output should observe ["draft"], not ["draft", "trim"]
+    assert.match(output!, /observe\(.*"draft"/, 'should observe "draft" path')
+    assert.doesNotMatch(output!, /observe\(.*"draft".*"trim"/, 'should NOT observe "draft","trim" path')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('non-component map items do NOT use data-prop-* attributes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gea-html-map-'))
+  try {
+    const componentPath = join(dir, 'App.jsx')
+    const output = await transformWithPlugin(
+      `
+import store from './store'
+
+export default class App {
+  template() {
+    return (
+      <div>
+        {store.items.map((item) => (
+          <div key={item.id} class={item.className} title={item.title}>
+            {item.text}
+          </div>
+        ))}
+      </div>
+    )
+  }
+}
+      `,
+      componentPath,
+    )
+    assert.ok(output, 'should produce compiled output')
+
+    // Regular HTML elements should use raw attribute names
+    assert.doesNotMatch(output!, /data-prop-/, 'HTML elements should not use data-prop-* attributes')
+    assert.doesNotMatch(output!, /__geaProps/, 'HTML elements should not set __geaProps')
+    assert.doesNotMatch(output!, /hasComponentItems/, 'HTML element maps should not have hasComponentItems')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('conditional slot with imported store boolean registers observer', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gea-cond-slot-'))
+  try {
+    const storePath = join(dir, 'store.ts')
+    await writeFile(
+      storePath,
+      `
+import { Store } from '@geajs/core'
+class MyStore extends Store {
+  cart = []
+  cartOpen = false
+  checkoutOpen = false
+  selectedCategory = 'All'
+  get cartCount() { return this.cart.reduce((sum, i) => sum + i.quantity, 0) }
+  get filteredProducts() { return this.products }
+  openCart() { this.cartOpen = true }
+  closeCart() { this.cartOpen = false }
+}
+export default new MyStore()
+      `.trim(),
+    )
+
+    const drawerPath = join(dir, 'cart-drawer.tsx')
+    await writeFile(
+      drawerPath,
+      `
+import { Component } from '@geajs/core'
+export default class CartDrawer extends Component {
+  template() { return <div class="cart-drawer">Cart</div> }
+}
+      `.trim(),
+    )
+
+    const dialogPath = join(dir, 'checkout-dialog.tsx')
+    await writeFile(
+      dialogPath,
+      `
+import { Component } from '@geajs/core'
+export default class CheckoutDialog extends Component {
+  template() { return <div class="checkout">Checkout</div> }
+}
+      `.trim(),
+    )
+
+    const componentPath = join(dir, 'App.jsx')
+    const output = await transformWithPlugin(
+      `
+import { Component } from '@geajs/core'
+import store from './store'
+import CartDrawer from './cart-drawer'
+import CheckoutDialog from './checkout-dialog'
+
+export default class App extends Component {
+  template() {
+    return (
+      <div>
+        <button click={store.openCart}>Open Cart</button>
+        <p>{store.cartCount} items</p>
+        {store.cartOpen && <CartDrawer />}
+        {store.checkoutOpen && <CheckoutDialog />}
+      </div>
+    )
+  }
+}
+      `,
+      componentPath,
+    )
+    assert.ok(output, 'should produce compiled output')
+
+    // The compiled output should have __geaSwapStateChildren that references cartOpen
+    assert.match(output!, /__geaSwapStateChildren/, 'should have __geaSwapStateChildren method')
+    // Must register an observer for cartOpen on the store
+    assert.match(output!, /observe\(\["cartOpen"\]/, 'should register observer for cartOpen')
+    assert.match(output!, /observe\(\["checkoutOpen"\]/, 'should register observer for checkoutOpen')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

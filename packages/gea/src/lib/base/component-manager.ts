@@ -177,7 +177,7 @@ export default class ComponentManager {
     let broken = false
 
     do {
-      if (broken) break
+      if (broken || e.cancelBubble) break
 
       broken = this.callHandlers(comps, e)
     } while ((e.targetEl = (e.targetEl as Node).parentNode) && e.targetEl != document.body)

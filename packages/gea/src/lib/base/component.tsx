@@ -109,7 +109,7 @@ export default class Component extends Store {
   __applyListChanges(container: HTMLElement, array: any[], changes: StoreChange[] | null, config: ListConfig) {
     const prevCount = container.childElementCount
     applyListChanges(container, array, changes, config)
-    if (container.childElementCount !== prevCount) {
+    if (container.childElementCount !== prevCount || config.hasComponentItems) {
       this.instantiateChildComponents_()
     }
   }
@@ -497,6 +497,13 @@ export default class Component extends Store {
   }
 
   extractComponentProps_(el) {
+    // Prefer JS object props set by createXItem for component-root map items
+    if (el.__geaProps) {
+      const jsProps = el.__geaProps
+      delete el.__geaProps
+      return jsProps
+    }
+
     const props = {}
     if (!el.getAttributeNames) return props
 
@@ -871,7 +878,7 @@ export default class Component extends Store {
       }
     } else if (cond && conf.getTruthyHtml) {
       const existingNode = marker.nextSibling as HTMLElement | null
-      if (existingNode && existingNode !== endMarker && existingNode.nodeType === 1) {
+      if (existingNode && (existingNode as Node) !== endMarker && existingNode.nodeType === 1) {
         if (existingNode.hasAttribute('data-gea-compiled-child-root')) return needsPatch
         const newHtml = conf.getTruthyHtml()
         const tpl = document.createElement('template')
@@ -880,6 +887,25 @@ export default class Component extends Store {
         if (newEl) {
           Component.__patchNode(existingNode, newEl)
         }
+      }
+    } else if (!cond && conf.getFalsyHtml) {
+      const newHtml = conf.getFalsyHtml()
+      const tpl = document.createElement('template')
+      tpl.innerHTML = newHtml
+      const newChildren = Array.from(tpl.content.childNodes)
+      let existing = marker.nextSibling
+      let idx = 0
+      while (existing && (existing as Node) !== endMarker && idx < newChildren.length) {
+        const desired = newChildren[idx]
+        if (existing.nodeType === 1 && desired.nodeType === 1) {
+          if (!(existing as Element).hasAttribute('data-gea-compiled-child-root')) {
+            Component.__patchNode(existing as Element, desired as Element)
+          }
+        } else if (existing.nodeType === 3 && desired.nodeType === 3) {
+          if (existing.textContent !== desired.textContent) existing.textContent = desired.textContent
+        }
+        existing = existing.nextSibling
+        idx++
       }
     }
     return needsPatch

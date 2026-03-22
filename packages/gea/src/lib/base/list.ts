@@ -4,6 +4,7 @@ export interface ListConfig {
   arrayPathParts: string[]
   create: (item: any, index?: number) => HTMLElement
   propPatchers?: Record<string, Array<(row: HTMLElement, value: any, item: any) => void>>
+  hasComponentItems?: boolean
 }
 
 function samePathParts(a?: string[], b?: string[]): boolean {

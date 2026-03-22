@@ -124,6 +124,62 @@ function unwrapJSX(expr: t.Expression): t.JSXElement | t.JSXFragment | undefined
   return undefined
 }
 
+/** When a .map() callback uses destructured parameters like ({ a, b }) => ...,
+ *  normalize it to (__item) => ... with all destructured name references rewritten
+ *  as member expressions on __item (e.g., a → __item.a). */
+export function normalizeDestructuredMapCallback(arrowFn: t.ArrowFunctionExpression): void {
+  const param = arrowFn.params[0]
+  if (!param || t.isIdentifier(param) || t.isRestElement(param)) return
+  if (!t.isObjectPattern(param)) return
+
+  const itemName = '__item'
+  // Collect local→property name mappings from the ObjectPattern
+  const nameMap = new Map<string, string>()
+  for (const prop of param.properties) {
+    if (t.isObjectProperty(prop)) {
+      const keyName = t.isIdentifier(prop.key) ? prop.key.name : t.isStringLiteral(prop.key) ? prop.key.value : null
+      const valueName = t.isIdentifier(prop.value) ? prop.value.name : null
+      if (keyName && valueName) nameMap.set(valueName, keyName)
+    }
+  }
+  if (nameMap.size === 0) return
+
+  // Rewrite all identifier references in the body
+  const rewriteNode = (node: t.Node): void => {
+    if (!node || typeof node !== 'object') return
+    for (const key of Object.keys(node) as (keyof typeof node)[]) {
+      if (key === 'type' || key === 'start' || key === 'end' || key === 'loc' || key === 'leadingComments' || key === 'trailingComments' || key === 'innerComments') continue
+      const child = (node as any)[key]
+      if (Array.isArray(child)) {
+        for (let i = 0; i < child.length; i++) {
+          if (child[i] && typeof child[i] === 'object' && child[i].type) {
+            if (t.isIdentifier(child[i]) && nameMap.has(child[i].name)) {
+              // Don't replace if it's a property key in a member expression
+              if (t.isMemberExpression(node) && key === 'property' && !(node as t.MemberExpression).computed) continue
+              // Don't replace if it's a property key in an object
+              if (t.isObjectProperty(node) && key === 'key') continue
+              child[i] = t.memberExpression(t.identifier(itemName), t.identifier(nameMap.get(child[i].name)!))
+            } else {
+              rewriteNode(child[i])
+            }
+          }
+        }
+      } else if (child && typeof child === 'object' && child.type) {
+        if (t.isIdentifier(child) && nameMap.has(child.name)) {
+          if (t.isMemberExpression(node) && key === 'property' && !(node as t.MemberExpression).computed) continue
+          if (t.isObjectProperty(node) && key === 'key') continue
+          ;(node as any)[key] = t.memberExpression(t.identifier(itemName), t.identifier(nameMap.get(child.name)!))
+        } else {
+          rewriteNode(child)
+        }
+      }
+    }
+  }
+  rewriteNode(arrowFn.body)
+
+  arrowFn.params[0] = t.identifier(itemName)
+}
+
 export function extractItemTemplate(arrowFn: t.ArrowFunctionExpression): t.JSXElement | t.JSXFragment | undefined {
   let body: t.Expression | undefined
   if (t.isJSXElement(arrowFn.body) || t.isJSXFragment(arrowFn.body)) body = arrowFn.body

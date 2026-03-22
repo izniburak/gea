@@ -19,6 +19,10 @@ export function isComponentTag(tagName: string): boolean {
   return tagName.length > 0 && isUpperCase(tagName[0])
 }
 
+export function camelToKebab(name: string): string {
+  return name.replace(/([A-Z])/g, '-$1').toLowerCase()
+}
+
 export function generateSelector(selectorPath: string[]): string {
   if (selectorPath.length === 0) return ':scope'
   return `:scope > ${selectorPath.join(' > ')}`

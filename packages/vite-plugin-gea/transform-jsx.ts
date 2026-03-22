@@ -468,6 +468,8 @@ interface Ctx {
   refBindings?: { refId: string; targetExpr: t.Expression }[]
   /** Counter for generating unique ref marker IDs */
   refCounter?: { value: number }
+  /** Prefix prepended to element path keys when looking up binding IDs inside conditional slots */
+  elementPathPrefix?: string
 }
 
 export function transformJSXToTemplate(el: t.JSXElement, ctx: Ctx, elementPath: string[] = []): t.TemplateLiteral {
@@ -866,8 +868,9 @@ function processElement(node: t.JSXElement, parts: TemplatePart[], ctx: Ctx, ele
     parts.push({ type: 'expression', value: t.memberExpression(t.thisExpression(), t.identifier('id')) })
     html = '"'
   } else {
-    const pathKey = elementPath.join(' > ')
-    const bindingId = ctx.elementPathToBindingId?.get(pathKey)
+    const rawPathKey = elementPath.join(' > ')
+    const pathKey = ctx.elementPathPrefix ? ctx.elementPathPrefix + ' > ' + rawPathKey : rawPathKey
+    const bindingId = ctx.elementPathToBindingId?.get(pathKey) ?? ctx.elementPathToBindingId?.get(rawPathKey)
     if (bindingId !== undefined && bindingId !== '') {
       parts.push({ type: 'string', value: html + ' id="' })
       parts.push({
@@ -972,8 +975,9 @@ function processElement(node: t.JSXElement, parts: TemplatePart[], ctx: Ctx, ele
         if (!ctx.inMapCallback && ctx.isRoot) {
           selectorExpression = buildEventSelectorExpression()
         } else {
-          const pathKey = elementPath.join(' > ')
-          const bindingId = ctx.elementPathToBindingId?.get(pathKey)
+          const rawPathKey2 = elementPath.join(' > ')
+          const pathKey2 = ctx.elementPathPrefix ? ctx.elementPathPrefix + ' > ' + rawPathKey2 : rawPathKey2
+          const bindingId = ctx.elementPathToBindingId?.get(pathKey2) ?? ctx.elementPathToBindingId?.get(rawPathKey2)
           if (!ctx.inMapCallback && bindingId !== undefined) {
             selectorExpression = buildEventSelectorExpression(bindingId)
           } else if (!ctx.inMapCallback && !ctx.inChildrenProp && !explicitIdAttr) {
@@ -1178,7 +1182,7 @@ function processChildren(
         })
         appendString(parts, `-->`)
         pushString(parts, '')
-        let condExpr = transformJSXExpression(rawExpr, ctx)
+        let condExpr = transformJSXExpression(rawExpr, { ...ctx, elementPathPrefix: '__cs_' + slot.slotId })
         const extracted = extractHtmlTemplatesFromConditional(condExpr)
         slot.truthyHtmlExpr = extracted.truthyHtmlExpr
         slot.falsyHtmlExpr = extracted.falsyHtmlExpr

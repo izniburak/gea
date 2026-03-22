@@ -12,7 +12,7 @@ import type {
   UnresolvedMapInfo,
   UnresolvedRelationalClassBinding,
 } from './ir.ts'
-import { buildObserveKey, pathPartsToString, resolvePath, generateSelector, getDirectChildElements } from './utils.ts'
+import { buildObserveKey, pathPartsToString, resolvePath, generateSelector, getDirectChildElements, getJSXTagName } from './utils.ts'
 import { analyzeJSXInMap } from './analyze-map.ts'
 import {
   resolveExpr,
@@ -22,6 +22,7 @@ import {
   addArrayTextBindings,
   extractItemTemplate,
   extractCallbackBodyStatements,
+  normalizeDestructuredMapCallback,
   detectItemIdProperty,
   detectContainerSelector,
   hasExplicitItemKey,
@@ -652,26 +653,16 @@ function analyzeChildren(
           templateSetupContext,
         )
       } else {
+        // Collect nested maps first, then handle text binding (which may create a
+        // conditional slot), then process the maps with the slot ID prefix so
+        // their container element paths don't collide with main-template paths.
         const nestedMapCalls = collectNestedMapCalls(expr)
-        nestedMapCalls.forEach((mapExpr) => {
-          handleArrayMap(
-            mapExpr,
-            tagName,
-            node,
-            elementPath,
-            index,
-            arrayMaps,
-            stateProps,
-            stateRefs,
-            onUnresolvedMap,
-            classBody,
-            templateSetupContext,
-          )
-        })
         const hasNestedMapCall = nestedMapCalls.length > 0
         const mixedTextNodeIndex = parentHasElementChildren(node)
           ? getDOMTextNodeIndex(node.children, index)
           : undefined
+        // Call handleTextBinding first — it may push a conditional slot
+        const slotCountBefore = conditionalSlots?.length ?? 0
         handleTextBinding(
           expr,
           node,
@@ -695,6 +686,39 @@ function analyzeChildren(
           conditionalSlotNodeMap,
           mixedTextNodeIndex,
         )
+        // Determine if a conditional slot was created for this expression
+        const slotCountAfter = conditionalSlots?.length ?? 0
+        const slotId = slotCountAfter > slotCountBefore
+          ? conditionalSlots![slotCountAfter - 1].slotId
+          : undefined
+        nestedMapCalls.forEach(({ mapExpr, parentElement, containerPath }) => {
+          let mapNode = node
+          let mapElementPath = elementPath
+          let mapTagName = tagName
+          if (parentElement) {
+            mapNode = parentElement
+            mapTagName = getJSXTagName(parentElement.openingElement.name) || tagName
+          }
+          if (containerPath) {
+            // Prefix with the conditional slot ID to avoid path collisions
+            // with elements in the main template
+            const prefix = slotId ? `__cs_${slotId}` : undefined
+            mapElementPath = prefix ? [prefix, ...containerPath] : containerPath
+          }
+          handleArrayMap(
+            mapExpr,
+            mapTagName,
+            mapNode,
+            mapElementPath,
+            index,
+            arrayMaps,
+            stateProps,
+            stateRefs,
+            onUnresolvedMap,
+            classBody,
+            templateSetupContext,
+          )
+        })
       }
     }
   })
@@ -709,14 +733,57 @@ function isMapCall(expr: t.Expression | t.JSXEmptyExpression): boolean {
   )
 }
 
-function collectNestedMapCalls(expr: t.Expression | t.JSXEmptyExpression): t.CallExpression[] {
+interface NestedMapInfo {
+  mapExpr: t.CallExpression
+  parentElement?: t.JSXElement
+  /** Element path from the conditional branch root to the map's container element */
+  containerPath?: string[]
+}
+
+function collectNestedMapCalls(expr: t.Expression | t.JSXEmptyExpression): NestedMapInfo[] {
   if (t.isJSXEmptyExpression(expr)) return []
-  const maps: t.CallExpression[] = []
+  const maps: NestedMapInfo[] = []
   const program = t.program([t.expressionStatement(t.cloneNode(expr, true) as t.Expression)])
   traverse(program, {
     noScope: true,
     CallExpression(path: NodePath<t.CallExpression>) {
-      if (isMapCall(path.node)) maps.push(path.node)
+      if (isMapCall(path.node)) {
+        let parentElement: t.JSXElement | undefined
+        let parentPath: NodePath | undefined
+        let current = path.parentPath
+        while (current) {
+          if (current.isJSXElement()) {
+            parentElement = current.node
+            parentPath = current
+            break
+          }
+          current = current.parentPath
+        }
+
+        // Compute element path from the conditional branch root to the parent JSX element
+        let containerPath: string[] | undefined
+        if (parentPath) {
+          const segments: string[] = []
+          let cur: NodePath = parentPath
+          while (cur.parentPath) {
+            const par = cur.parentPath
+            if (par.isJSXElement() || par.isJSXFragment()) {
+              const children = getDirectChildElements(par.node.children)
+              const match = children.find((dc) => dc.node === cur.node)
+              if (match) segments.unshift(match.selectorSegment)
+              if (par.isJSXElement()) {
+                cur = par
+                continue
+              }
+            }
+            // Reached a non-JSX parent (expression, conditional, etc.) — stop
+            break
+          }
+          if (segments.length > 0) containerPath = segments
+        }
+
+        maps.push({ mapExpr: path.node, parentElement, containerPath })
+      }
     },
   })
   return maps
@@ -800,6 +867,7 @@ function handleArrayMap(
   if (!result?.parts?.length || isDestructuredNonReactive || !t.isArrowFunctionExpression(expr.arguments[0])) {
     if (t.isArrowFunctionExpression(expr.arguments?.[0])) {
       const arrowFn = expr.arguments[0] as t.ArrowFunctionExpression
+      normalizeDestructuredMapCallback(arrowFn)
       const itemVar = t.isIdentifier(arrowFn.params[0]) ? arrowFn.params[0].name : 'item'
       const indexVar = t.isIdentifier(arrowFn.params[1]) ? arrowFn.params[1].name : undefined
       const itemTemplate = extractItemTemplate(arrowFn)
@@ -850,9 +918,11 @@ function handleArrayMap(
 
   const finalPath = result.parts
   const arrowFn = expr.arguments[0] as t.ArrowFunctionExpression
+  normalizeDestructuredMapCallback(arrowFn)
   const itemVar = t.isIdentifier(arrowFn.params[0]) ? arrowFn.params[0].name : 'item'
   const indexVar = t.isIdentifier(arrowFn.params[1]) ? arrowFn.params[1].name : undefined
   const itemTemplate = extractItemTemplate(arrowFn)
+  const cbBodyStmts = extractCallbackBodyStatements(arrowFn)
   const itemIdProperty = detectItemIdProperty(itemTemplate, itemVar)
   const relationalIdProperty = itemIdProperty || 'id'
   const isKeyed = hasExplicitItemKey(itemTemplate)
@@ -950,6 +1020,7 @@ function handleArrayMap(
     itemIdProperty: itemIdProperty || (isKeyed ? undefined : 'id'),
     classToggleName,
     conditionalBindings,
+    ...(cbBodyStmts.length > 0 ? { callbackBodyStatements: cbBodyStmts } : {}),
   })
 }
 

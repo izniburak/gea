@@ -1,6 +1,6 @@
-# @geajs/core
+# @geajs/ui
 
-## 1.0.2
+## 0.1.1
 
 ### Patch Changes
 
@@ -39,10 +39,6 @@
   - Add missing `key` props to `.map()` items across all Zag-based components (Accordion, Combobox, FileUpload, Menu, PinInput, RadioGroup, RatingGroup, Select, TagsInput, ToggleGroup).
   - Dialog: conditionally render the trigger button only when `triggerLabel` is provided.
 
-- [`68c4029`](https://github.com/dashersw/gea/commit/68c4029ce3a80d197f149105aee15b56f76a517d) Thanks [@dashersw](https://github.com/dashersw)! - Pass the item key property from the compiler to the runtime per map registration instead of relying on a global heuristic.
-
-  `__geaRegisterMap` now accepts an optional `keyProp` argument that `__geaSyncItems` uses to extract the reconciliation key from each item. This replaces the module-level `__geaSyncItemKey` function that always assumed `item.id`. Maps whose items use a different key property (e.g. `item.value`) now reconcile correctly without falling back to `[object Object]`.
-
 - [`3de8f86`](https://github.com/dashersw/gea/commit/3de8f86a00a3b824b46f0edcb92ed3ca4a846a5d) Thanks [@dashersw](https://github.com/dashersw)! - Add style objects, ref attribute, and DnD manager overhaul; improve compiler robustness.
 
   **@geajs/vite-plugin**
@@ -73,8 +69,5 @@
   - Skip `onDragEnd` callback when dropping back at the original position.
   - Export `dndManager` singleton, `DragResult` type, `Draggable`, `Droppable`, and `DragDropContext` from the package index.
 
-## 1.0.1
-
-### Patch Changes
-
-- [`977a065`](https://github.com/dashersw/gea/commit/977a0657ec905cc23548ffb12e9cd320c8c06ded) Thanks [@dashersw](https://github.com/dashersw)! - Fix compiler handling of hyphenated component names, template-scoped variables, early-return guards, && guards with .map(), class getter reactivity, and render props. Improve component discovery with import-based global registry. Fix Router to read initial URL on construction and add navigate() alias.
+- Updated dependencies [[`82c94f4`](https://github.com/dashersw/gea/commit/82c94f41e5ddce4ad5e9919204577eb48b754ec4), [`68c4029`](https://github.com/dashersw/gea/commit/68c4029ce3a80d197f149105aee15b56f76a517d), [`3de8f86`](https://github.com/dashersw/gea/commit/3de8f86a00a3b824b46f0edcb92ed3ca4a846a5d)]:
+  - @geajs/core@1.0.2

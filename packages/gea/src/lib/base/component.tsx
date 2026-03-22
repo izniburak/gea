@@ -4,13 +4,6 @@ import { Store } from '../store'
 import type { StoreChange } from '../store'
 import type { ListConfig } from './list'
 
-function __geaSyncItemKey(item: any): string {
-  if (item != null && typeof item === 'object' && 'id' in item) {
-    return String((item as any).id)
-  }
-  return String(item)
-}
-
 export default class Component extends Store {
   static __componentClasses: Map<string, Function> = new Map()
 
@@ -552,9 +545,17 @@ export default class Component extends Store {
     getContainer: () => HTMLElement | null,
     getItems: () => any[],
     createItem: (item: any) => HTMLElement,
+    keyProp?: string,
   ): void {
     if (!this.__geaMaps) this.__geaMaps = {}
-    this.__geaMaps[idx] = { containerProp, getContainer, getItems, createItem, container: null as HTMLElement | null }
+    this.__geaMaps[idx] = {
+      containerProp,
+      getContainer,
+      getItems,
+      createItem,
+      container: null as HTMLElement | null,
+      keyProp,
+    }
   }
 
   __geaSyncMap(idx: number): void {
@@ -601,10 +602,23 @@ export default class Component extends Store {
     ;(this as any)[map.containerProp] = container
     const items = map.getItems()
     const normalizedItems = Array.isArray(items) ? items : []
-    this.__geaSyncItems(container, normalizedItems, map.createItem)
+    this.__geaSyncItems(container, normalizedItems, map.createItem, map.keyProp)
   }
 
-  __geaSyncItems(container: HTMLElement, items: any[], createItemFn: (item: any, index?: number) => HTMLElement): void {
+  __geaSyncItems(
+    container: HTMLElement,
+    items: any[],
+    createItemFn: (item: any, index?: number) => HTMLElement,
+    keyProp?: string,
+  ): void {
+    const itemKey = (item: any): string => {
+      if (item != null && typeof item === 'object') {
+        if (keyProp && keyProp in item) return String(item[keyProp])
+        if ('id' in item) return String(item.id)
+      }
+      return String(item)
+    }
+
     const c = container as any
     let prev: any[] | undefined = c.__geaPrev
     if (!prev) {
@@ -621,7 +635,7 @@ export default class Component extends Store {
     if (prev.length === items.length) {
       let same = true
       for (let j = 0; j < prev.length; j++) {
-        if (__geaSyncItemKey(prev[j]) !== __geaSyncItemKey(items[j])) {
+        if (itemKey(prev[j]) !== itemKey(items[j])) {
           same = false
           break
         }
@@ -635,7 +649,7 @@ export default class Component extends Store {
     if (items.length > prev.length) {
       let appendOk = true
       for (let j = 0; j < prev.length; j++) {
-        if (__geaSyncItemKey(prev[j]) !== __geaSyncItemKey(items[j])) {
+        if (itemKey(prev[j]) !== itemKey(items[j])) {
           appendOk = false
           break
         }
@@ -661,7 +675,7 @@ export default class Component extends Store {
 
     if (items.length < prev.length) {
       const newSet = new Set<string>()
-      for (let j = 0; j < items.length; j++) newSet.add(__geaSyncItemKey(items[j]))
+      for (let j = 0; j < items.length; j++) newSet.add(itemKey(items[j]))
       const removals: ChildNode[] = []
       for (let sc: ChildNode | null = container.firstChild; sc; sc = sc.nextSibling) {
         if (sc.nodeType === 1) {

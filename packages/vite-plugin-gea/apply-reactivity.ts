@@ -384,19 +384,14 @@ export function applyStaticReactivity(
                         t.identifier('cssText'),
                       ),
                       t.conditionalExpression(
-                        t.binaryExpression(
-                          '===',
-                          t.unaryExpression('typeof', valueExpr),
-                          t.stringLiteral('object'),
-                        ),
+                        t.binaryExpression('===', t.unaryExpression('typeof', valueExpr), t.stringLiteral('object')),
                         t.callExpression(
                           t.memberExpression(
                             t.callExpression(
                               t.memberExpression(
-                                t.callExpression(
-                                  t.memberExpression(t.identifier('Object'), t.identifier('entries')),
-                                  [valueExpr],
-                                ),
+                                t.callExpression(t.memberExpression(t.identifier('Object'), t.identifier('entries')), [
+                                  valueExpr,
+                                ]),
                                 t.identifier('map'),
                               ),
                               [
@@ -406,10 +401,10 @@ export function applyStaticReactivity(
                                     '+',
                                     t.binaryExpression(
                                       '+',
-                                      t.callExpression(
-                                        t.memberExpression(t.identifier('k'), t.identifier('replace')),
-                                        [t.regExpLiteral('[A-Z]', 'g'), t.stringLiteral('-$&')],
-                                      ),
+                                      t.callExpression(t.memberExpression(t.identifier('k'), t.identifier('replace')), [
+                                        t.regExpLiteral('[A-Z]', 'g'),
+                                        t.stringLiteral('-$&'),
+                                      ]),
                                       t.stringLiteral(': '),
                                     ),
                                     t.identifier('v'),
@@ -1747,20 +1742,26 @@ function generateMapRegistration(
   const prunedSetup = pruneUnusedSetupStatements(setupStatements, arrExpr)
   const getItemsBody: t.Statement[] = [...prunedSetup, t.returnStatement(arrExpr)]
 
-  return t.expressionStatement(
-    t.callExpression(t.memberExpression(t.thisExpression(), t.identifier('__geaRegisterMap')), [
-      t.numericLiteral(mapIdx),
-      t.stringLiteral(containerName),
-      t.arrowFunctionExpression([], containerLookup),
-      t.arrowFunctionExpression([], t.blockStatement(getItemsBody)),
-      t.arrowFunctionExpression(
+  const registerArgs: t.Expression[] = [
+    t.numericLiteral(mapIdx),
+    t.stringLiteral(containerName),
+    t.arrowFunctionExpression([], containerLookup),
+    t.arrowFunctionExpression([], t.blockStatement(getItemsBody)),
+    t.arrowFunctionExpression(
+      unresolvedMap.indexVariable ? [t.identifier('__item'), t.identifier('__idx')] : [t.identifier('__item')],
+      t.callExpression(
+        t.memberExpression(t.thisExpression(), t.identifier(createMethodName)),
         unresolvedMap.indexVariable ? [t.identifier('__item'), t.identifier('__idx')] : [t.identifier('__item')],
-        t.callExpression(
-          t.memberExpression(t.thisExpression(), t.identifier(createMethodName)),
-          unresolvedMap.indexVariable ? [t.identifier('__item'), t.identifier('__idx')] : [t.identifier('__item')],
-        ),
       ),
-    ]),
+    ),
+  ]
+
+  if (arrayMap.itemIdProperty && arrayMap.itemIdProperty !== ITEM_IS_KEY) {
+    registerArgs.push(t.stringLiteral(arrayMap.itemIdProperty))
+  }
+
+  return t.expressionStatement(
+    t.callExpression(t.memberExpression(t.thisExpression(), t.identifier('__geaRegisterMap')), registerArgs),
   )
 }
 

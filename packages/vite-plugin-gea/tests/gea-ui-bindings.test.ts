@@ -161,11 +161,7 @@ test('radio-group pattern: onValueChange callback captured in created() updates 
       'enterprise',
       'parent DOM text must update after child fires onValueChange',
     )
-    assert.equal(
-      (view as any).radioVal,
-      'enterprise',
-      'parent state must reflect new value',
-    )
+    assert.equal((view as any).radioVal, 'enterprise', 'parent state must reflect new value')
 
     view.dispose()
   } finally {
@@ -474,11 +470,7 @@ test('number-input pattern: onValueChange updates parent DOM', async () => {
     child._fireCallback('4')
     await flushMicrotasks()
 
-    assert.equal(
-      view.el?.querySelector('.display')?.textContent,
-      '4',
-      'parent DOM must update on second callback',
-    )
+    assert.equal(view.el?.querySelector('.display')?.textContent, '4', 'parent DOM must update on second callback')
 
     view.dispose()
   } finally {
@@ -885,16 +877,8 @@ test('zag pattern: child sets this.value AND fires callback — parent DOM updat
     child._onValueChange('enterprise')
     await flushMicrotasks()
 
-    assert.equal(
-      view.el?.querySelector('.display')?.textContent,
-      'enterprise',
-      'parent DOM must update',
-    )
-    assert.equal(
-      view.el?.querySelector('.zag-child')?.textContent,
-      'enterprise',
-      'child DOM must reflect updated prop',
-    )
+    assert.equal(view.el?.querySelector('.display')?.textContent, 'enterprise', 'parent DOM must update')
+    assert.equal(view.el?.querySelector('.zag-child')?.textContent, 'enterprise', 'child DOM must reflect updated prop')
     assert.equal(child.value, 'enterprise', 'child local value must be set')
 
     view.dispose()
@@ -1067,11 +1051,7 @@ test('radio-group map: callback + items refresh does not destroy item DOM', asyn
     child._onValueChange('enterprise')
     await flushMicrotasks()
 
-    assert.equal(
-      view.el?.querySelector('.display')?.textContent,
-      'enterprise',
-      'parent DOM text must update',
-    )
+    assert.equal(view.el?.querySelector('.display')?.textContent, 'enterprise', 'parent DOM text must update')
 
     // After callback, parent refreshes props (including a new items array).
     // The map re-sync must not destroy existing item elements.
@@ -1165,11 +1145,7 @@ test('child with props.class: prop refresh patches class without full re-render'
     assert.equal(view.el?.querySelector('.display')?.textContent, 'updated')
 
     const childElAfter = view.el?.querySelector('.child-root')
-    assert.equal(
-      childElAfter?.getAttribute('data-zag'),
-      'bound',
-      'child root DOM must be stable — no full re-render',
-    )
+    assert.equal(childElAfter?.getAttribute('data-zag'), 'bound', 'child root DOM must be stable — no full re-render')
 
     view.dispose()
   } finally {

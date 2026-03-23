@@ -168,6 +168,8 @@ A root component reads from stores and passes data down as props to children:
 ```jsx
 import { Component } from '@geajs/core'
 import todoStore from './todo-store'
+import TodoInput from './TodoInput'
+import TodoItem from './TodoItem'
 
 export default class App extends Component {
   template() {

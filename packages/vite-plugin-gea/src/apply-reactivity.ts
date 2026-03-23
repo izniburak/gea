@@ -927,6 +927,32 @@ export function applyStaticReactivity(
           const unresolvedMapPropRefreshDeps: Array<{ mapIdx: number; propNames: string[] }> = []
           unresolvedBindings.forEach(({ info, binding }) => {
             const deps = info.dependencies || collectUnresolvedDependencies([info], stateRefs, classPath.node.body)
+            if (!info.dependencies) info.dependencies = deps
+
+            // Local state deps (e.g. this.value used in .map()) need observe
+            // methods that call __geaSyncMap so the list re-syncs on change.
+            const localStateDeps = deps.filter((dep) => !dep.storeVar && dep.pathParts[0] !== 'props')
+            const mapIdx = getMapIndex(binding.arrayPathParts)
+            for (const dep of localStateDeps) {
+              mergeObserveMethod(
+                dep.observeKey,
+                t.classMethod(
+                  'method',
+                  t.identifier(getObserveMethodName(dep.pathParts, dep.storeVar)),
+                  [t.identifier('value'), t.identifier('change')],
+                  t.blockStatement([
+                    t.expressionStatement(
+                      t.callExpression(
+                        t.memberExpression(t.thisExpression(), t.identifier('__geaSyncMap')),
+                        [t.numericLiteral(mapIdx)],
+                      ),
+                    ),
+                  ]),
+                ),
+              )
+              if (!stateProps.has(dep.observeKey)) stateProps.set(dep.observeKey, dep.pathParts)
+            }
+
             const propDeps = deps.filter((dep) => !dep.storeVar && dep.pathParts[0] === 'props')
             if (propDeps.length === 0) return
 

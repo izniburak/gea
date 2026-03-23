@@ -13,6 +13,7 @@ export default class ZagComponent extends Component {
   declare _api: any
   declare _spreadCleanups: Map<string, SpreadCleanup>
   declare _spreadScheduled: boolean
+  declare _zagIdMap: Map<string, Element>
 
   createMachine(_props: any): any {
     return null
@@ -35,12 +36,23 @@ export default class ZagComponent extends Component {
   created(props: any) {
     if (!this._spreadCleanups) this._spreadCleanups = new Map()
     if (this._spreadScheduled === undefined) this._spreadScheduled = false
+    if (!this._zagIdMap) this._zagIdMap = new Map()
 
     const machineDef = this.createMachine(props)
     if (!machineDef) return
 
     const machineProps = this.getMachineProps(props)
     this._machine = new VanillaMachine(machineDef, machineProps)
+
+    // Patch scope.getById: Zag uses IDs like "tags-input:xyz:..." for DOM
+    // lookups, but _applyAllSpreads restores compiler binding IDs on elements.
+    // The mapping lets Zag find elements by their expected Zag IDs.
+    const zagIdMap = this._zagIdMap
+    const origGetById = this._machine.scope.getById
+    this._machine.scope.getById = (id: string) => {
+      return origGetById(id) || zagIdMap.get(id) || null
+    }
+
     this._machine.start()
 
     this._api = this.connectApi(this._machine.service)
@@ -110,15 +122,28 @@ export default class ZagComponent extends Component {
 
         // Preserve compiled binding IDs: Zag's spreadProps overrides element
         // IDs, but the compiler's observers rely on getElementById with binding
-        // IDs. Restore the original binding ID after applying spreads.
+        // IDs. We restore the binding ID and store the Zag ID in _zagIdMap so
+        // scope.getById (patched in created()) can still find elements.
+        // Note: we never clear _zagIdMap here because spreadProps caches
+        // previous attrs and skips unchanged values — on subsequent calls the
+        // ID won't be re-set, so we'd lose the mapping.
         const bindingId = el.id
         const cleanup = spreadProps(el, nextProps)
         if (bindingId && el.id !== bindingId) {
+          this._zagIdMap.set(el.id, el)
           el.id = bindingId
         }
         this._spreadCleanups.set(key, cleanup)
       }
     }
+  }
+
+  __geaSyncMap(idx: number) {
+    super.__geaSyncMap(idx)
+    // After the map syncs new/updated DOM items, Zag spreads must be
+    // re-applied because createItemFn produces elements without Zag's
+    // event handlers and attributes.
+    this._scheduleSpreadApplication()
   }
 
   onAfterRender() {
@@ -147,6 +172,7 @@ export default class ZagComponent extends Component {
       this._machine = null
     }
     this._api = null
+    this._zagIdMap?.clear()
 
     super.dispose()
   }

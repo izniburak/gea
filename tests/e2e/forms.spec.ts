@@ -84,6 +84,16 @@ test.describe('forms settings page', () => {
     await expect(page.getByText('10.0.0.1')).toBeVisible()
   })
 
+  test('tags input delete removes a tag', async ({ page }) => {
+    await expect(page.getByText('192.168.1.1')).toBeVisible()
+
+    const deleteBtn = page.locator('[data-scope="tags-input"] [data-part="item-delete-trigger"]').first()
+    await deleteBtn.click()
+
+    await expect(page.getByText('192.168.1.1')).not.toBeVisible()
+    await expect(page.getByText('10.0.0.1')).toBeVisible()
+  })
+
   test('documents section has file upload', async ({ page }) => {
     await expect(page.getByRole('heading', { name: 'Documents' })).toBeVisible()
     // FileUpload component should exist

@@ -219,3 +219,8 @@ export function analyzeStoreGetters(
 
   return result
 }
+
+export function clearCaches() {
+  getterDepsCache.clear()
+  storeFieldsCache.clear()
+}

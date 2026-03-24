@@ -259,3 +259,7 @@ export function getHoistableRootEventsForImport(importer: string, source: string
   hoistableRootEventCache.set(resolved, result)
   return result
 }
+
+export function clearCaches() {
+  hoistableRootEventCache.clear()
+}

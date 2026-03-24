@@ -404,3 +404,129 @@ describe('Component.__reconcileList', () => {
     assert.equal(result[2], items[1]) // was second, now third
   })
 })
+
+describe('Component.__observeList', () => {
+  let restoreDom: () => void
+  let Component: Awaited<ReturnType<typeof loadModules>>['Component']
+  let Store: Awaited<ReturnType<typeof loadModules>>['Store']
+  let store: any
+
+  beforeEach(async () => {
+    restoreDom = installDom()
+    const mods = await loadModules()
+    Component = mods.Component
+    Store = mods.Store
+
+    let nextId = 1
+    class TodoStore extends Store {
+      todos: any[] = []
+      add(text: string) { this.todos.push({ id: nextId++, text, done: false }) }
+      toggle(id: number) {
+        const t = this.todos.find((t: any) => t.id === id)
+        if (t) t.done = !t.done
+      }
+      remove(id: number) {
+        this.todos = this.todos.filter((t: any) => t.id !== id)
+      }
+    }
+    store = new TodoStore()
+  })
+
+  afterEach(() => {
+    restoreDom()
+  })
+
+  it('appends items on push', async () => {
+    class Item extends Component {
+      template() { return `<li id="${this.id}">${this.props.text}</li>` }
+    }
+    class Parent extends Component {
+      _items!: any[]
+      template() { return `<div id="${this.id}"><ul id="${this.id}-list"></ul></div>` }
+      created() { this._items = [] }
+      createdHooks() {
+        this.__observeList(store, ['todos'], {
+          items: this._items,
+          container: () => this.__el('list'),
+          Ctor: Item,
+          props: (todo: any) => ({ text: todo.text }),
+          key: (todo: any) => todo.id,
+        })
+      }
+    }
+    const parent = new Parent()
+    document.body.innerHTML = ''
+    parent.render(document.body)
+
+    store.add('first')
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(parent._items.length, 1)
+    assert.equal(parent.__el('list')?.children.length, 1)
+  })
+
+  it('updates item props on property change', async () => {
+    class Item extends Component {
+      template() { return `<li id="${this.id}">${this.props.done ? 'done' : 'todo'}</li>` }
+    }
+    class Parent extends Component {
+      _items!: any[]
+      template() { return `<div id="${this.id}"><ul id="${this.id}-list"></ul></div>` }
+      created() { this._items = [] }
+      createdHooks() {
+        this.__observeList(store, ['todos'], {
+          items: this._items,
+          container: () => this.__el('list'),
+          Ctor: Item,
+          props: (todo: any) => ({ text: todo.text, done: todo.done }),
+          key: (todo: any) => todo.id,
+        })
+      }
+    }
+    const parent = new Parent()
+    document.body.innerHTML = ''
+    parent.render(document.body)
+
+    store.add('task')
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const todoId = store.todos[0].id
+
+    store.toggle(todoId)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    // Item should have updated props
+    assert.equal(parent._items[0].props.done, true)
+  })
+
+  it('reconciles on filter (remove)', async () => {
+    class Item extends Component {
+      template() { return `<li id="${this.id}">${this.props.text}</li>` }
+    }
+    class Parent extends Component {
+      _items!: any[]
+      template() { return `<div id="${this.id}"><ul id="${this.id}-list"></ul></div>` }
+      created() { this._items = [] }
+      createdHooks() {
+        this.__observeList(store, ['todos'], {
+          items: this._items,
+          container: () => this.__el('list'),
+          Ctor: Item,
+          props: (todo: any) => ({ text: todo.text }),
+          key: (todo: any) => todo.id,
+        })
+      }
+    }
+    const parent = new Parent()
+    document.body.innerHTML = ''
+    parent.render(document.body)
+
+    store.add('first')
+    store.add('second')
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(parent._items.length, 2)
+    const firstId = store.todos[0].id
+
+    store.remove(firstId)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(parent._items.length, 1)
+    assert.equal(parent._items[0].props.text, 'second')
+  })
+})

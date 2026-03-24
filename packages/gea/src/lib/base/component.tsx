@@ -582,6 +582,58 @@ export default class Component extends Store {
     return next
   }
 
+  __observeList(
+    store: any,
+    path: string[],
+    config: {
+      items: Component[]
+      container: () => HTMLElement | null
+      Ctor: new (props: any) => Component
+      props: (item: any) => any
+      key: (item: any) => any
+      onchange?: () => void
+    },
+  ): void {
+    this.__observe(store, path, (_value, changes) => {
+      const storeData = store.__store
+      const arr = path.reduce((obj: any, key: string) => obj?.[key], storeData) ?? []
+
+      if (changes.every((c: any) => c.isArrayItemPropUpdate)) {
+        // Item property update (e.g. todo.done toggled)
+        for (const c of changes) {
+          const item = config.items[c.arrayIndex]
+          if (item) {
+            item.__geaUpdateProps(config.props(arr[c.arrayIndex]))
+          }
+        }
+      } else if (changes.length === 1 && changes[0].type === 'append') {
+        // Append (push)
+        const { start, count } = changes[0]
+        const container = config.container()
+        for (let i = 0; i < count; i++) {
+          const data = arr[start + i]
+          const item = this.__child(config.Ctor, config.props(data), config.key(data))
+          config.items.push(item)
+          if (this.rendered_ && container) item.render(container)
+        }
+      } else {
+        // Full replace (filter, sort, reassign)
+        const newItems = this.__reconcileList(
+          config.items,
+          arr,
+          config.container(),
+          config.Ctor,
+          config.props,
+          config.key,
+        )
+        config.items.length = 0
+        config.items.push(...newItems)
+      }
+
+      config.onchange?.()
+    })
+  }
+
   __geaSwapChild(markerId: string, newChild: Component | false | null | undefined) {
     const marker = document.getElementById(this.id_ + '-' + markerId)
     if (!marker) return

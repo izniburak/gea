@@ -932,7 +932,10 @@ export function applyStaticReactivity(
                     appendCompiledEventMethods(classPath.node.body, delegatedEvents)
                   }
                 }
-                inlineIntoConstructor(classPath.node.body, [arrayResult.constructorInit])
+                inlineIntoConstructor(classPath.node.body, [
+                  ...arrayResult.arrSetupStatements.map((s) => t.cloneNode(s, true) as t.Statement),
+                  arrayResult.constructorInit,
+                ])
                 if (storeArrayAccess) {
                   observeListConfigs.push({
                     storeVar: storeArrayAccess.storeVar,
@@ -1966,7 +1969,10 @@ export function applyStaticReactivity(
                   appendCompiledEventMethods(classPath.node.body, delegatedEvents)
                 }
               }
-              inlineIntoConstructor(classPath.node.body, [arrayResult.constructorInit])
+              inlineIntoConstructor(classPath.node.body, [
+                ...arrayResult.arrSetupStatements.map((s) => t.cloneNode(s, true) as t.Statement),
+                arrayResult.constructorInit,
+              ])
               if (arrayMap.storeVar) {
                 observeListConfigs.push({
                   storeVar: arrayMap.storeVar,

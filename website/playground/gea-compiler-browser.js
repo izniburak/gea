@@ -47877,20 +47877,20 @@ function extractHtmlTemplatesFromConditional(expr) {
   }
   return {};
 }
-function extractEnsureChildCall(expr) {
+function extractChildInstanceRef(expr) {
   if (!libExports.isLogicalExpression(expr) || expr.operator !== "&&") return null;
   const right = expr.right;
-  let ensureCallExpr = null;
+  let memberExpr = null;
   if (libExports.isTemplateLiteral(right) && right.expressions.length === 1) {
-    ensureCallExpr = right.expressions[0];
-  } else if (libExports.isCallExpression(right)) {
-    ensureCallExpr = right;
+    const inner = right.expressions[0];
+    if (libExports.isMemberExpression(inner)) memberExpr = inner;
+  } else if (libExports.isMemberExpression(right)) {
+    memberExpr = right;
   }
-  if (!ensureCallExpr || !libExports.isCallExpression(ensureCallExpr) || !libExports.isMemberExpression(ensureCallExpr.callee) || !libExports.isThisExpression(ensureCallExpr.callee.object) || !libExports.isIdentifier(ensureCallExpr.callee.property) || !ensureCallExpr.callee.property.name.startsWith("__ensureChild_"))
+  if (!memberExpr || !libExports.isThisExpression(memberExpr.object) || !libExports.isIdentifier(memberExpr.property) || !memberExpr.property.name.startsWith("_"))
     return null;
-  const ensureMethod = ensureCallExpr.callee.property.name;
-  const instanceVar = "_" + ensureMethod.replace("__ensureChild_", "");
-  return { instanceVar, ensureMethod, guardExpr: expr.left };
+  const instanceVar = memberExpr.property.name;
+  return { instanceVar, guardExpr: expr.left };
 }
 function expressionMayBeFalsy(expr) {
   if (libExports.isLogicalExpression(expr) && expr.operator === "&&") return true;
@@ -48283,13 +48283,7 @@ function processElement(node, parts, ctx, elementPath = []) {
       pushString(parts, "");
       parts.push({
         type: "expression",
-        value: libExports.callExpression(
-          libExports.memberExpression(
-            libExports.thisExpression(),
-            libExports.identifier(`__ensureChild_${instance.instanceVar.replace(/^_/, "")}`)
-          ),
-          []
-        )
+        value: libExports.memberExpression(libExports.thisExpression(), libExports.identifier(instance.instanceVar))
       });
       return;
     }
@@ -48654,7 +48648,7 @@ function processChildren(children, parts, ctx, elementPath, dcCursor, directChil
         let expr = transformJSXExpression(rawExpr, ctx);
         const stateSlots = ctx.stateChildSlots;
         const stateCounter = ctx.stateChildSlotCounter;
-        const childCallInfo = stateSlots && stateCounter && expressionMayBeFalsy(rawExpr) ? extractEnsureChildCall(expr) : null;
+        const childCallInfo = stateSlots && stateCounter && expressionMayBeFalsy(rawExpr) ? extractChildInstanceRef(expr) : null;
         if (childCallInfo && stateSlots && stateCounter) {
           const markerId = `sc${stateCounter.value}`;
           stateCounter.value++;
@@ -48662,7 +48656,6 @@ function processChildren(children, parts, ctx, elementPath, dcCursor, directChil
           stateSlots.push({
             markerId,
             childInstanceVar: childCallInfo.instanceVar,
-            ensureMethodName: childCallInfo.ensureMethod,
             guardExpr: childCallInfo.guardExpr,
             dependencies: collectExpressionDependencies(childCallInfo.guardExpr, ctx.stateRefs, setupStatements)
           });
@@ -49145,7 +49138,7 @@ function injectChildComponents(ast, componentInstances, directForwardingChildren
   if (componentInstances.size === 0) return;
   const childComponents = Array.from(componentInstances.values()).flat();
   const constructionOrder = [...childComponents].sort((a, b) => (b.dfsIndex ?? 0) - (a.dfsIndex ?? 0));
-  const instanceStatements = buildInstanceStatements(constructionOrder);
+  const instanceStatements = buildInstanceStatements(constructionOrder, directForwardingChildren);
   let injected = false;
   traverse$9(ast, {
     ClassDeclaration(path) {
@@ -49171,11 +49164,8 @@ function injectChildComponents(ast, componentInstances, directForwardingChildren
         const hasPropsBuilder = !isDirect && !noProps;
         if (hasPropsBuilder) {
           path.node.body.body.push(buildPropsBuilderMethod(child));
-          path.node.body.body.push(buildRefreshMethod(child));
         }
-        path.node.body.body.push(buildEnsureMethod(child, hasPropsBuilder));
       });
-      ensureDisposeMethod(path.node.body, childComponents);
     }
   });
 }
@@ -49194,18 +49184,50 @@ function injectComponentRegistrations(ast, componentInstances) {
     }
   });
 }
-function buildInstanceStatements(instances) {
+function buildInstanceStatements(instances, directForwardingChildren) {
   const stmts = [];
   instances.forEach((child) => {
-    stmts.push(js`this.${id(child.instanceVar)} = null;`);
+    let propsArg;
+    const isDirect = directForwardingChildren?.has(child.instanceVar);
+    const noProps = childHasNoProps(child);
+    const hasPropsBuilder = !isDirect && !noProps;
+    if (hasPropsBuilder) {
+      propsArg = libExports.callExpression(
+        libExports.memberExpression(libExports.thisExpression(), libExports.identifier(getPropsBuilderMethodName(child))),
+        []
+      );
+    } else if (child.directMappings && child.directMappings.length > 0) {
+      propsArg = libExports.objectExpression(
+        child.directMappings.map(
+          (m) => libExports.objectProperty(
+            libExports.identifier(m.childPropName),
+            libExports.memberExpression(
+              libExports.memberExpression(libExports.thisExpression(), libExports.identifier("props")),
+              libExports.identifier(m.parentPropName)
+            )
+          )
+        )
+      );
+    } else {
+      propsArg = libExports.objectExpression([]);
+    }
+    stmts.push(
+      libExports.expressionStatement(
+        libExports.assignmentExpression(
+          "=",
+          libExports.memberExpression(libExports.thisExpression(), libExports.identifier(child.instanceVar)),
+          libExports.callExpression(libExports.memberExpression(libExports.thisExpression(), libExports.identifier("__child")), [
+            libExports.identifier(child.tagName),
+            propsArg
+          ])
+        )
+      )
+    );
   });
   return stmts;
 }
 function getPropsBuilderMethodName(child) {
   return `__buildProps_${child.instanceVar.replace(/^_/, "")}`;
-}
-function getEnsureChildMethodName(child) {
-  return `__ensureChild_${child.instanceVar.replace(/^_/, "")}`;
 }
 function collectBindingNames(stmt) {
   if (libExports.isVariableDeclaration(stmt)) {
@@ -49274,92 +49296,6 @@ function buildPropsBuilderMethod(child) {
     return appendToBody(jsMethod`${id(getPropsBuilderMethodName(child))}() {}`, tryCatch);
   }
   return appendToBody(jsMethod`${id(getPropsBuilderMethodName(child))}() {}`, ...prunedSetup, returnStmt);
-}
-function buildEnsureMethod(child, hasPropsBuilder = true) {
-  let propsArg;
-  if (hasPropsBuilder && !childHasNoProps(child)) {
-    propsArg = libExports.callExpression(
-      libExports.memberExpression(libExports.thisExpression(), libExports.identifier(getPropsBuilderMethodName(child))),
-      []
-    );
-  } else if (child.directMappings && child.directMappings.length > 0) {
-    propsArg = libExports.objectExpression(
-      child.directMappings.map(
-        (m) => libExports.objectProperty(
-          libExports.identifier(m.childPropName),
-          libExports.memberExpression(
-            libExports.memberExpression(libExports.thisExpression(), libExports.identifier("props")),
-            libExports.identifier(m.parentPropName)
-          )
-        )
-      )
-    );
-  } else {
-    propsArg = libExports.objectExpression([]);
-  }
-  const refreshPropsStmt = hasPropsBuilder && !childHasNoProps(child) ? libExports.expressionStatement(
-    libExports.callExpression(
-      libExports.memberExpression(
-        libExports.memberExpression(libExports.thisExpression(), libExports.identifier(child.instanceVar)),
-        libExports.identifier("__geaUpdateProps")
-      ),
-      [
-        libExports.callExpression(
-          libExports.memberExpression(libExports.thisExpression(), libExports.identifier(getPropsBuilderMethodName(child))),
-          []
-        )
-      ]
-    )
-  ) : null;
-  return appendToBody(
-    jsMethod`${id(getEnsureChildMethodName(child))}() {}`,
-    libExports.ifStatement(
-      libExports.unaryExpression("!", libExports.memberExpression(libExports.thisExpression(), libExports.identifier(child.instanceVar))),
-      libExports.blockStatement([
-        libExports.expressionStatement(
-          libExports.assignmentExpression(
-            "=",
-            libExports.memberExpression(libExports.thisExpression(), libExports.identifier(child.instanceVar)),
-            libExports.newExpression(libExports.identifier(child.tagName), [propsArg])
-          )
-        ),
-        js`this.${id(child.instanceVar)}.parentComponent = this;`,
-        js`this.${id(child.instanceVar)}.__geaCompiledChild = true;`
-      ]),
-      refreshPropsStmt ? libExports.blockStatement([refreshPropsStmt]) : void 0
-    ),
-    libExports.returnStatement(libExports.memberExpression(libExports.thisExpression(), libExports.identifier(child.instanceVar)))
-  );
-}
-function buildRefreshMethod(child) {
-  const method = jsMethod`${id(`__refreshChildProps_${child.instanceVar.replace(/^_/, "")}`)}() {}`;
-  method.body.body.push(js`const child = this.${id(child.instanceVar)};`);
-  if (child.lazy) {
-    method.body.body.push(
-      libExports.ifStatement(libExports.unaryExpression("!", libExports.identifier("child")), libExports.blockStatement([libExports.returnStatement()]))
-    );
-  } else {
-    method.body.body.push(
-      libExports.ifStatement(libExports.unaryExpression("!", libExports.identifier("child")), libExports.blockStatement([libExports.returnStatement()]))
-    );
-  }
-  method.body.body.push(
-    js`child.__geaUpdateProps(this.${id(getPropsBuilderMethodName(child))}());`
-  );
-  return method;
-}
-function ensureDisposeMethod(classBody, children) {
-  const disposeCalls = children.map((child) => js`this.${id(child.instanceVar)}?.dispose?.();`);
-  const existingDispose = classBody.body.find(
-    (member) => libExports.isClassMethod(member) && libExports.isIdentifier(member.key) && member.key.name === "dispose"
-  );
-  if (existingDispose) {
-    existingDispose.body.body.unshift(...disposeCalls);
-    return;
-  }
-  classBody.body.push(
-    appendToBody(jsMethod`${id("dispose")}() {}`, ...disposeCalls, js`super.dispose();`)
-  );
 }
 
 const traverse$8 = babelTraverse.default || babelTraverse;
@@ -49469,6 +49405,10 @@ function buildSimpleUpdate(binding, param, stateRefs) {
   if (binding.textNodeIndex !== void 0 && binding.type === "text") {
     const idx = libExports.numericLiteral(binding.textNodeIndex);
     return js`if (${el}) { const __tn = ${jsExpr`${el}.childNodes[${idx}]`}; if (__tn && __tn.nodeValue !== ${valueExpr}) __tn.nodeValue = ${valueExpr}; }`;
+  }
+  if (target === "textContent" && binding.bindingId && binding.bindingId !== "") {
+    const suffix = libExports.stringLiteral(binding.bindingId);
+    return js`${jsExpr`this.__updateText(${suffix}, ${valueExpr})`};`;
   }
   return js`if (${el}) { ${jsExpr`${el}.${id(target)}`} = ${valueExpr}; }`;
 }
@@ -51316,20 +51256,14 @@ function getArrayCapName(arrayPropName) {
 function getComponentArrayItemsName(arrayPropName) {
   return `_${arrayPropName}Items`;
 }
-function getComponentArrayBuildMethodName(arrayPropName) {
-  return `_build${getArrayCapName(arrayPropName)}Items`;
-}
 function getComponentArrayRefreshMethodName(arrayPropName) {
   return `__refresh${getArrayCapName(arrayPropName)}Items`;
 }
-function getComponentArrayMountMethodName(arrayPropName) {
-  return `__mount${getArrayCapName(arrayPropName)}Items`;
-}
-function generateComponentArrayMethods(um, arrayPropName, imports, propNames, _classBody, storeArrayAccess, wholeParamName, templateSetupContext) {
+function generateComponentArrayResult(um, arrayPropName, imports, propNames, _classBody, storeArrayAccess, wholeParamName, templateSetupContext) {
   const comp = isUnresolvedMapWithComponentChild(um, imports);
-  if (!comp) return [];
+  if (!comp) return null;
   const itemTemplate = um.itemTemplate;
-  if (!itemTemplate || !libExports.isJSXElement(itemTemplate)) return [];
+  if (!itemTemplate || !libExports.isJSXElement(itemTemplate)) return null;
   const mapJsxCtx = {
     imports,
     componentInstances: /* @__PURE__ */ new Map(),
@@ -51388,17 +51322,6 @@ function generateComponentArrayMethods(um, arrayPropName, imports, propNames, _c
     finalPropsExpr = cloned;
   }
   const itemsName = getComponentArrayItemsName(arrayPropName);
-  const buildMethodName = getComponentArrayBuildMethodName(arrayPropName);
-  const refreshMethodName = getComponentArrayRefreshMethodName(arrayPropName);
-  const mountMethodName = `__mount${getArrayCapName(arrayPropName)}Items`;
-  const containerName = `__${arrayPropName}ItemsContainer`;
-  const containerLookupExpr = um.containerBindingId ? libExports.callExpression(libExports.memberExpression(libExports.identifier("document"), libExports.identifier("getElementById")), [
-    libExports.binaryExpression(
-      "+",
-      libExports.memberExpression(libExports.thisExpression(), libExports.identifier("id")),
-      libExports.stringLiteral(`-${um.containerBindingId}`)
-    )
-  ]) : jsExpr`this.$(":scope")`;
   let arrAccessExpr;
   let arrSetupStatements = [];
   if (storeArrayAccess) {
@@ -51430,164 +51353,39 @@ function generateComponentArrayMethods(um, arrayPropName, imports, propNames, _c
   itemPropsMethod.body.body.push(...itemPropsSetup, libExports.returnStatement(finalPropsExpr));
   const itemIdProp = um.itemIdProperty;
   const keyExpr = itemIdProp && itemIdProp !== ITEM_IS_KEY ? libExports.callExpression(libExports.identifier("String"), [libExports.memberExpression(libExports.identifier("opt"), libExports.identifier(itemIdProp))]) : itemIdProp === ITEM_IS_KEY ? libExports.callExpression(libExports.identifier("String"), [libExports.identifier("opt")]) : libExports.binaryExpression("+", libExports.stringLiteral("__idx_"), libExports.identifier("__k"));
-  const buildMethod = jsMethod`${id(buildMethodName)}() {}`;
-  buildMethod.body.body.push(
-    ...arrSetupStatements,
-    ...itemIdProp ? jsBlockBody`
-           const arr = ${arrAccessExpr} ?? [];
-           this.${id(itemsName)} = arr.map((opt, __k) => {
-             const item = new ${id(comp.componentTag)}(${libExports.cloneNode(itemPropsCall, true)});
-             item.parentComponent = this;
-             item.__geaCompiledChild = true;
-             item.__geaItemKey = ${libExports.cloneNode(keyExpr, true)};
-             return item;
-           });
-         ` : jsBlockBody`
-           const arr = ${arrAccessExpr} ?? [];
-           this.${id(itemsName)} = arr.map(opt => {
-             const item = new ${id(comp.componentTag)}(${libExports.cloneNode(itemPropsCall, true)});
-             item.parentComponent = this;
-             item.__geaCompiledChild = true;
-             return item;
-           });
-         `
+  const mapParams = [libExports.identifier("opt")];
+  if (indexVar || !itemIdProp) mapParams.push(libExports.identifier("__k"));
+  const childCall = libExports.callExpression(
+    libExports.memberExpression(libExports.thisExpression(), libExports.identifier("__child")),
+    [
+      libExports.identifier(comp.componentTag),
+      libExports.cloneNode(itemPropsCall, true),
+      libExports.cloneNode(keyExpr, true)
+    ]
   );
-  const mountMethod = jsMethod`${id(mountMethodName)}() {}`;
-  mountMethod.body.body.push(
-    ...jsBlockBody`
-      if (!this.${id(containerName)} || !this.${id(containerName)}.isConnected) {
-        this.${id(containerName)} = ${containerLookupExpr};
-      }
-      if (!this.${id(containerName)}) return;
-      for (let i = 0; i < (this.${id(itemsName)}?.length ?? 0); i++) {
-        const item = this.${id(itemsName)}[i];
-        if (!item) continue;
-        if (!this.__childComponents.includes(item)) {
-          this.__childComponents.push(item);
-        }
-        item.render(this.${id(containerName)});
-      }
-    `
+  const mapCallback = libExports.arrowFunctionExpression(mapParams, childCall);
+  const nullishCoalesce = libExports.logicalExpression("??", libExports.cloneNode(arrAccessExpr, true), libExports.arrayExpression([]));
+  const parenthesized = libExports.parenthesizedExpression ? libExports.parenthesizedExpression(nullishCoalesce) : nullishCoalesce;
+  const mapCallExpr = libExports.callExpression(
+    libExports.memberExpression(parenthesized, libExports.identifier("map")),
+    [mapCallback]
   );
-  const refreshMethod = jsMethod`${id(refreshMethodName)}() {}`;
-  if (itemIdProp) {
-    refreshMethod.body.body.push(
-      ...arrSetupStatements.map((stmt) => libExports.cloneNode(stmt, true)),
-      ...jsBlockBody`
-         const arr = ${libExports.cloneNode(arrAccessExpr, true)} ?? [];
-         const __old = this.${id(itemsName)} ?? [];
-         const __keyMap = new Map();
-         for (let __k = 0; __k < __old.length; __k++) {
-           if (__old[__k].__geaItemKey != null) {
-             __keyMap.set(__old[__k].__geaItemKey, __old[__k]);
-           }
-         }
-         const __new = [];
-         for (let __k = 0; __k < arr.length; __k++) {
-           const opt = arr[__k];
-           const __key = ${libExports.cloneNode(keyExpr, true)};
-           const __existing = __keyMap.get(__key);
-           if (__existing) {
-             __existing.__geaUpdateProps(${libExports.cloneNode(itemPropsCall, true)});
-             __new.push(__existing);
-             __keyMap.delete(__key);
-           } else {
-             const __item = new ${id(comp.componentTag)}(${libExports.cloneNode(itemPropsCall, true)});
-             __item.parentComponent = this;
-             __item.__geaCompiledChild = true;
-             __item.__geaItemKey = __key;
-             __new.push(__item);
-           }
-         }
-         for (const [, __removed] of __keyMap) {
-           __removed.dispose?.();
-         }
-         if ((!this.${id(containerName)} || !this.${id(containerName)}.isConnected) && this.rendered_) {
-           this.${id(containerName)} = ${libExports.cloneNode(containerLookupExpr, true)};
-         }
-         const __container = this.${id(containerName)};
-         if (__container && this.rendered_) {
-           for (let __k = 0; __k < __new.length; __k++) {
-             if (!__new[__k].rendered_) {
-               if (!this.__childComponents.includes(__new[__k])) {
-                 this.__childComponents.push(__new[__k]);
-               }
-               __new[__k].render(__container);
-             }
-           }
-           let __cursor = __container.firstChild;
-           for (let __k = 0; __k < __new.length; __k++) {
-             let __el = __new[__k].element_;
-             if (!__el) continue;
-             while (__el.parentElement && __el.parentElement !== __container) __el = __el.parentElement;
-             if (__el !== __cursor) {
-               __container.insertBefore(__el, __cursor || null);
-             } else {
-               __cursor = __cursor.nextSibling;
-             }
-           }
-         }
-         this.${id(itemsName)} = __new;
-         this.__childComponents = (this.__childComponents || []).filter(
-           child => !__old.includes(child) || __new.includes(child)
-         );
-       `
-    );
-  } else {
-    refreshMethod.body.body.push(
-      ...arrSetupStatements.map((stmt) => libExports.cloneNode(stmt, true)),
-      ...jsBlockBody`
-         const arr = ${libExports.cloneNode(arrAccessExpr, true)} ?? [];
-         const __old = this.${id(itemsName)} ?? [];
-         const __oldLen = __old.length;
-         const __newLen = arr.length;
-         if (__oldLen !== __newLen) {
-           if (__newLen > __oldLen) {
-             for (let __k = 0; __k < __oldLen; __k++) {
-               const opt = arr[__k];
-               __old[__k].__geaUpdateProps(${libExports.cloneNode(itemPropsCall, true)});
-             }
-             if ((!this.${id(containerName)} || !this.${id(containerName)}.isConnected) && this.rendered_) {
-               this.${id(containerName)} = ${libExports.cloneNode(containerLookupExpr, true)};
-             }
-             for (let __k = __oldLen; __k < __newLen; __k++) {
-               const opt = arr[__k];
-               const __item = new ${id(comp.componentTag)}(${libExports.cloneNode(itemPropsCall, true)});
-               __item.parentComponent = this;
-               __item.__geaCompiledChild = true;
-               this.${id(itemsName)}.push(__item);
-               if (!this.__childComponents.includes(__item)) {
-                 this.__childComponents.push(__item);
-               }
-               if (this.rendered_ && this.${id(containerName)}) {
-                 __item.render(this.${id(containerName)});
-               }
-             }
-             return;
-           }
-           if (__newLen < __oldLen) {
-             for (let __k = __newLen; __k < __oldLen; __k++) {
-               __old[__k]?.dispose?.();
-             }
-             this.${id(itemsName)}.length = __newLen;
-             this.__childComponents = (this.__childComponents || []).filter(
-               child => !__old.slice(__newLen).includes(child)
-             );
-             for (let __k = 0; __k < __newLen; __k++) {
-               const opt = arr[__k];
-               this.${id(itemsName)}[__k].__geaUpdateProps(${libExports.cloneNode(itemPropsCall, true)});
-             }
-             return;
-           }
-         }
-         for (let i = 0; i < arr.length; i++) {
-           const opt = arr[i];
-           this.${id(itemsName)}[i].__geaUpdateProps(${libExports.cloneNode(itemPropsCall, true)});
-         }
-       `
-    );
-  }
-  return [itemPropsMethod, buildMethod, mountMethod, refreshMethod];
+  const constructorInit = libExports.expressionStatement(
+    libExports.assignmentExpression(
+      "=",
+      libExports.memberExpression(libExports.thisExpression(), libExports.identifier(itemsName)),
+      mapCallExpr
+    )
+  );
+  return {
+    itemPropsMethod,
+    constructorInit,
+    componentTag: comp.componentTag,
+    containerBindingId: um.containerBindingId,
+    itemIdProperty: itemIdProp,
+    arrAccessExpr,
+    arrSetupStatements
+  };
 }
 
 const traverse$4 = babelTraverse.default || babelTraverse;
@@ -51609,36 +51407,162 @@ const BOOLEAN_HTML_ATTRS = /* @__PURE__ */ new Set([
   "defer",
   "async"
 ]);
-function generateCreatedHooks(stores, hasArrayConfigs) {
+function generateCreatedHooks(stores, hasArrayConfigs, observeListConfigs = []) {
   const body = [];
   if (hasArrayConfigs) {
     body.push(js`this.__ensureArrayConfigs();`);
   }
-  const observeExprs = [];
+  const observeListPathKeys = /* @__PURE__ */ new Set();
+  for (const config of observeListConfigs) {
+    observeListPathKeys.add(`${config.storeVar}:${JSON.stringify(config.pathParts)}`);
+  }
   for (const store of stores) {
-    for (const observeHandler of store.observeHandlers) {
-      observeExprs.push(
-        jsExpr`
-          ${libExports.cloneNode(store.captureExpression, true)}.observe(
-            ${libExports.arrayExpression(observeHandler.pathParts.map((part) => libExports.stringLiteral(part)))},
-            this.${id(observeHandler.methodName)}.bind(this)
+    const byPath = /* @__PURE__ */ new Map();
+    for (const handler of store.observeHandlers) {
+      const pathKey = JSON.stringify(handler.pathParts);
+      const listKey = `${store.storeVar}:${pathKey}`;
+      if (observeListPathKeys.has(listKey)) continue;
+      if (!byPath.has(pathKey)) byPath.set(pathKey, []);
+      byPath.get(pathKey).push({ methodName: handler.methodName, isVia: handler.isVia, rereadExpr: handler.rereadExpr });
+    }
+    const storeVarExpr = libExports.identifier(store.storeVar);
+    for (const [pathKey, handlers] of byPath) {
+      const pathParts = JSON.parse(pathKey);
+      const pathArray = libExports.arrayExpression(pathParts.map((part) => libExports.stringLiteral(part)));
+      if (handlers.length === 1 && !handlers[0].isVia) {
+        body.push(
+          libExports.expressionStatement(
+            libExports.callExpression(
+              libExports.memberExpression(libExports.thisExpression(), libExports.identifier("__observe")),
+              [
+                storeVarExpr,
+                pathArray,
+                libExports.memberExpression(libExports.thisExpression(), libExports.identifier(handlers[0].methodName))
+              ]
+            )
           )
-        `
+        );
+      } else {
+        const vParam = libExports.identifier("__v");
+        const cParam = libExports.identifier("__c");
+        const callStmts = [];
+        for (const h of handlers) {
+          if (h.isVia && h.rereadExpr) {
+            callStmts.push(
+              libExports.expressionStatement(
+                libExports.callExpression(
+                  libExports.memberExpression(libExports.thisExpression(), libExports.identifier(h.methodName)),
+                  [libExports.cloneNode(h.rereadExpr, true), libExports.nullLiteral()]
+                )
+              )
+            );
+          } else {
+            callStmts.push(
+              libExports.expressionStatement(
+                libExports.callExpression(
+                  libExports.memberExpression(libExports.thisExpression(), libExports.identifier(h.methodName)),
+                  [vParam, cParam]
+                )
+              )
+            );
+          }
+        }
+        body.push(
+          libExports.expressionStatement(
+            libExports.callExpression(
+              libExports.memberExpression(libExports.thisExpression(), libExports.identifier("__observe")),
+              [
+                storeVarExpr,
+                pathArray,
+                libExports.arrowFunctionExpression(
+                  [vParam, cParam],
+                  libExports.blockStatement(callStmts)
+                )
+              ]
+            )
+          )
+        );
+      }
+    }
+    for (const config of observeListConfigs.filter((c) => c.storeVar === store.storeVar)) {
+      const pathArray = libExports.arrayExpression(config.pathParts.map((part) => libExports.stringLiteral(part)));
+      const itemsName = getComponentArrayItemsName(config.arrayPropName);
+      const itemPropsMethodName = `__itemProps_${config.arrayPropName}`;
+      const configProps = [
+        libExports.objectProperty(
+          libExports.identifier("items"),
+          libExports.memberExpression(libExports.thisExpression(), libExports.identifier(itemsName))
+        ),
+        libExports.objectProperty(
+          libExports.identifier("container"),
+          libExports.arrowFunctionExpression(
+            [],
+            config.containerBindingId ? libExports.callExpression(
+              libExports.memberExpression(libExports.thisExpression(), libExports.identifier("__el")),
+              [libExports.stringLiteral(config.containerBindingId)]
+            ) : jsExpr`this.$(":scope")`
+          )
+        ),
+        libExports.objectProperty(libExports.identifier("Ctor"), libExports.identifier(config.componentTag)),
+        libExports.objectProperty(
+          libExports.identifier("props"),
+          libExports.arrowFunctionExpression(
+            [libExports.identifier("opt")],
+            libExports.callExpression(
+              libExports.memberExpression(libExports.thisExpression(), libExports.identifier(itemPropsMethodName)),
+              [libExports.identifier("opt")]
+            )
+          )
+        ),
+        libExports.objectProperty(
+          libExports.identifier("key"),
+          config.itemIdProperty && config.itemIdProperty !== ITEM_IS_KEY ? libExports.arrowFunctionExpression(
+            [libExports.identifier("opt")],
+            libExports.memberExpression(libExports.identifier("opt"), libExports.identifier(config.itemIdProperty))
+          ) : config.itemIdProperty === ITEM_IS_KEY ? libExports.arrowFunctionExpression([libExports.identifier("opt")], libExports.identifier("opt")) : libExports.arrowFunctionExpression(
+            [libExports.identifier("opt"), libExports.identifier("__k")],
+            libExports.binaryExpression("+", libExports.stringLiteral("__idx_"), libExports.identifier("__k"))
+          )
+        )
+      ];
+      const samePathHandlers = [];
+      const pathKey = JSON.stringify(config.pathParts);
+      for (const handler of store.observeHandlers) {
+        if (JSON.stringify(handler.pathParts) === pathKey) {
+          samePathHandlers.push(handler);
+        }
+      }
+      if (samePathHandlers.length > 0) {
+        const onchangeStmts = samePathHandlers.map(
+          (h) => libExports.expressionStatement(
+            h.isVia && h.rereadExpr ? libExports.callExpression(
+              libExports.memberExpression(libExports.thisExpression(), libExports.identifier(h.methodName)),
+              [libExports.cloneNode(h.rereadExpr, true), libExports.nullLiteral()]
+            ) : libExports.callExpression(
+              libExports.memberExpression(libExports.thisExpression(), libExports.identifier(h.methodName)),
+              [
+                libExports.memberExpression(libExports.identifier(config.storeVar), libExports.identifier(config.pathParts[0])),
+                libExports.nullLiteral()
+              ]
+            )
+          )
+        );
+        configProps.push(
+          libExports.objectProperty(
+            libExports.identifier("onchange"),
+            libExports.arrowFunctionExpression([], libExports.blockStatement(onchangeStmts))
+          )
+        );
+      }
+      body.push(
+        libExports.expressionStatement(
+          libExports.callExpression(
+            libExports.memberExpression(libExports.thisExpression(), libExports.identifier("__observeList")),
+            [storeVarExpr, pathArray, libExports.objectExpression(configProps)]
+          )
+        )
       );
     }
-  }
-  if (observeExprs.length > 0) {
-    body.push(
-      libExports.expressionStatement(
-        libExports.callExpression(
-          libExports.memberExpression(
-            libExports.memberExpression(libExports.thisExpression(), libExports.identifier("__observer_removers__")),
-            libExports.identifier("push")
-          ),
-          observeExprs
-        )
-      )
-    );
   }
   const method = jsMethod`${id("createdHooks")}() {}`;
   method.body.body.push(...body);
@@ -51651,26 +51575,16 @@ function generateLocalStateObserverSetup(observeHandlers, hasArrayConfigs) {
     body.push(js`this.__ensureArrayConfigs();`);
   }
   body.push(js`if (!${localStore}) { return; }`);
-  const observeExprs = [];
-  observeHandlers.forEach((observeHandler) => {
-    observeExprs.push(
-      jsExpr`
-        ${localStore}.observe(
-          ${libExports.arrayExpression(observeHandler.pathParts.map((part) => libExports.stringLiteral(part)))},
-          this.${id(observeHandler.methodName)}.bind(this)
-        )
-      `
-    );
-  });
-  if (observeExprs.length > 0) {
+  for (const observeHandler of observeHandlers) {
     body.push(
       libExports.expressionStatement(
         libExports.callExpression(
-          libExports.memberExpression(
-            libExports.memberExpression(libExports.thisExpression(), libExports.identifier("__observer_removers__")),
-            libExports.identifier("push")
-          ),
-          observeExprs
+          libExports.memberExpression(libExports.thisExpression(), libExports.identifier("__observe")),
+          [
+            libExports.thisExpression(),
+            libExports.arrayExpression(observeHandler.pathParts.map((part) => libExports.stringLiteral(part))),
+            libExports.memberExpression(libExports.thisExpression(), libExports.identifier(observeHandler.methodName))
+          ]
         )
       )
     );
@@ -52143,8 +52057,8 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
           const unresolvedBindings = [];
           const componentArrayRefreshDeps = [];
           const componentArrayDisposeTargets = [];
-          const componentArrayMountMethods = [];
           const storeComponentArrayObservers = [];
+          const observeListConfigs = [];
           const mapItemAttrInfos = [];
           const tmplBody = templateMethod?.body.body ?? [];
           let tmplReturnIdx = -1;
@@ -52173,7 +52087,7 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                 }
               }
               const propNames = getTemplatePropNames(classPath.node.body);
-              const methods = generateComponentArrayMethods(
+              const arrayResult = generateComponentArrayResult(
                 um,
                 arrayPropName,
                 imports,
@@ -52183,9 +52097,9 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                 getTemplateParamIdentifier(classPath.node.body),
                 tmplSetupCtx
               );
-              if (methods.length > 0 && templateMethod) {
-                methods.forEach((method2) => classPath.node.body.body.push(method2));
-                const importSource = imports.get(isComponentSlot.componentTag);
+              if (arrayResult && templateMethod) {
+                classPath.node.body.body.push(arrayResult.itemPropsMethod);
+                const importSource = imports.get(arrayResult.componentTag);
                 if (importSource) {
                   const delegatedEvents = getHoistableRootEventsForImport(sourceFile, importSource).map((meta) => ({
                     eventType: meta.eventType,
@@ -52198,15 +52112,90 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                     appendCompiledEventMethods(classPath.node.body, delegatedEvents);
                   }
                 }
-                ensureConstructorCalls(classPath.node.body, getComponentArrayBuildMethodName(arrayPropName));
+                inlineIntoConstructor(classPath.node.body, [arrayResult.constructorInit]);
                 if (storeArrayAccess) {
-                  storeComponentArrayObservers.push({
+                  observeListConfigs.push({
                     storeVar: storeArrayAccess.storeVar,
-                    refreshMethodName: getComponentArrayRefreshMethodName(arrayPropName),
-                    pathParts: [storeArrayAccess.propName]
+                    pathParts: [storeArrayAccess.propName],
+                    arrayPropName,
+                    componentTag: arrayResult.componentTag,
+                    containerBindingId: arrayResult.containerBindingId,
+                    itemIdProperty: arrayResult.itemIdProperty
                   });
                 } else {
                   const computedDeps = (um.dependencies || collectUnresolvedDependencies([um], stateRefs, classPath.node.body)).filter((dep) => dep.storeVar || dep.pathParts[0] !== "props");
+                  const refreshMethodName = getComponentArrayRefreshMethodName(arrayPropName);
+                  const itemsName = getComponentArrayItemsName(arrayPropName);
+                  const itemPropsMethodNameRef = `__itemProps_${arrayPropName}`;
+                  const containerSuffix = arrayResult.containerBindingId;
+                  const containerExpr = containerSuffix ? libExports.callExpression(
+                    libExports.memberExpression(libExports.thisExpression(), libExports.identifier("__el")),
+                    [libExports.stringLiteral(containerSuffix)]
+                  ) : jsExpr`this.$(":scope")`;
+                  const itemIdProp = arrayResult.itemIdProperty;
+                  const keyFn = itemIdProp && itemIdProp !== ITEM_IS_KEY ? libExports.arrowFunctionExpression(
+                    [libExports.identifier("opt")],
+                    libExports.memberExpression(libExports.identifier("opt"), libExports.identifier(itemIdProp))
+                  ) : itemIdProp === ITEM_IS_KEY ? libExports.arrowFunctionExpression([libExports.identifier("opt")], libExports.identifier("opt")) : libExports.arrowFunctionExpression(
+                    [libExports.identifier("opt"), libExports.identifier("__k")],
+                    libExports.binaryExpression("+", libExports.stringLiteral("__idx_"), libExports.identifier("__k"))
+                  );
+                  const refreshMethod = libExports.classMethod(
+                    "method",
+                    libExports.identifier(refreshMethodName),
+                    [],
+                    libExports.blockStatement([
+                      ...arrayResult.arrSetupStatements.map((s) => libExports.cloneNode(s, true)),
+                      libExports.variableDeclaration("const", [
+                        libExports.variableDeclarator(
+                          libExports.identifier("__arr"),
+                          libExports.logicalExpression("??", libExports.cloneNode(arrayResult.arrAccessExpr, true), libExports.arrayExpression([]))
+                        )
+                      ]),
+                      libExports.variableDeclaration("const", [
+                        libExports.variableDeclarator(
+                          libExports.identifier("__new"),
+                          libExports.callExpression(
+                            libExports.memberExpression(libExports.thisExpression(), libExports.identifier("__reconcileList")),
+                            [
+                              libExports.memberExpression(libExports.thisExpression(), libExports.identifier(itemsName)),
+                              libExports.identifier("__arr"),
+                              libExports.cloneNode(containerExpr, true),
+                              libExports.identifier(arrayResult.componentTag),
+                              libExports.arrowFunctionExpression(
+                                [libExports.identifier("opt")],
+                                libExports.callExpression(
+                                  libExports.memberExpression(libExports.thisExpression(), libExports.identifier(itemPropsMethodNameRef)),
+                                  [libExports.identifier("opt")]
+                                )
+                              ),
+                              libExports.cloneNode(keyFn, true)
+                            ]
+                          )
+                        )
+                      ]),
+                      libExports.expressionStatement(
+                        libExports.assignmentExpression(
+                          "=",
+                          libExports.memberExpression(
+                            libExports.memberExpression(libExports.thisExpression(), libExports.identifier(itemsName)),
+                            libExports.identifier("length")
+                          ),
+                          libExports.numericLiteral(0)
+                        )
+                      ),
+                      libExports.expressionStatement(
+                        libExports.callExpression(
+                          libExports.memberExpression(
+                            libExports.memberExpression(libExports.thisExpression(), libExports.identifier(itemsName)),
+                            libExports.identifier("push")
+                          ),
+                          [libExports.spreadElement(libExports.identifier("__new"))]
+                        )
+                      )
+                    ])
+                  );
+                  classPath.node.body.body.push(refreshMethod);
                   if (computedDeps.length > 0) {
                     computedDeps.forEach((dep) => {
                       mergeObserveMethod(
@@ -52220,7 +52209,7 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                               libExports.callExpression(
                                 libExports.memberExpression(
                                   libExports.thisExpression(),
-                                  libExports.identifier(getComponentArrayRefreshMethodName(arrayPropName))
+                                  libExports.identifier(refreshMethodName)
                                 ),
                                 []
                               )
@@ -52231,13 +52220,13 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                       if (dep.storeVar) {
                         storeComponentArrayObservers.push({
                           storeVar: dep.storeVar,
-                          refreshMethodName: getComponentArrayRefreshMethodName(arrayPropName),
+                          refreshMethodName,
                           pathParts: dep.pathParts
                         });
                       }
                     });
                   }
-                  const itemPropsMethod = methods[0];
+                  const itemPropsMethod = arrayResult.itemPropsMethod;
                   if (itemPropsMethod && libExports.isBlockStatement(itemPropsMethod.body)) {
                     const returnStmt = itemPropsMethod.body.body.find((s) => libExports.isReturnStatement(s));
                     if (returnStmt?.argument && libExports.isObjectExpression(returnStmt.argument)) {
@@ -52256,28 +52245,9 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                         const key = `${dep.storeVar}:${pathPartsToString(dep.pathParts)}`;
                         if (computedDepKeys.has(key)) continue;
                         computedDepKeys.add(key);
-                        mergeObserveMethod(
-                          dep.observeKey,
-                          libExports.classMethod(
-                            "method",
-                            libExports.identifier(getObserveMethodName(dep.pathParts, dep.storeVar)),
-                            [libExports.identifier("value"), libExports.identifier("change")],
-                            libExports.blockStatement([
-                              libExports.expressionStatement(
-                                libExports.callExpression(
-                                  libExports.memberExpression(
-                                    libExports.thisExpression(),
-                                    libExports.identifier(getComponentArrayRefreshMethodName(arrayPropName))
-                                  ),
-                                  []
-                                )
-                              )
-                            ])
-                          )
-                        );
                         storeComponentArrayObservers.push({
                           storeVar: dep.storeVar,
-                          refreshMethodName: getComponentArrayRefreshMethodName(arrayPropName),
+                          refreshMethodName,
                           pathParts: dep.pathParts
                         });
                       }
@@ -52286,12 +52256,11 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                   const itemTemplateProps = collectPropNamesFromItemTemplate(um.itemTemplate, propNames);
                   const allStoreManaged = computedDeps.length > 0 && computedDeps.every((dep) => dep.storeVar);
                   componentArrayRefreshDeps.push({
-                    methodName: getComponentArrayRefreshMethodName(arrayPropName),
+                    methodName: refreshMethodName,
                     propNames: allStoreManaged ? [...itemTemplateProps] : [arrayPropName, ...itemTemplateProps]
                   });
                 }
                 componentArrayDisposeTargets.push(getComponentArrayItemsName(arrayPropName));
-                componentArrayMountMethods.push(getComponentArrayMountMethodName(arrayPropName));
                 replaceMapWithComponentArrayItems(
                   templateMethod,
                   um.computationExpr,
@@ -52684,6 +52653,8 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
             if (unresolvedMapKeys.has(observeKey)) continue;
             const handledByComponentArray = storeComponentArrayObservers.some(
               (obs) => obs.storeVar === storeVar && pathPartsToString(obs.pathParts) === pathPartsToString(propPath)
+            ) || observeListConfigs.some(
+              (olc) => olc.storeVar === storeVar && pathPartsToString(olc.pathParts) === pathPartsToString(propPath)
             );
             if (handledByComponentArray) continue;
             if (!childObserveGroups.has(observeKey)) {
@@ -52747,7 +52718,7 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
             for (const member of classPath.node.body.body) {
               if (!libExports.isClassMethod(member) || !libExports.isIdentifier(member.key)) continue;
               const methodName = member.key.name;
-              const isRelevant = childrenWithResolvedMap.size > 0 && (methodName.startsWith("__buildProps_") || methodName.startsWith("__refreshChildProps_"));
+              const isRelevant = childrenWithResolvedMap.size > 0 && methodName.startsWith("__buildProps_");
               if (!isRelevant) continue;
               traverse$4(libExports.program([libExports.expressionStatement(libExports.functionExpression(null, [], member.body))]), {
                 noScope: true,
@@ -52796,15 +52767,23 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                 (child) => libExports.expressionStatement(
                   libExports.callExpression(
                     libExports.memberExpression(
-                      libExports.thisExpression(),
-                      libExports.identifier(`__refreshChildProps_${child.instanceVar.replace(/^_/, "")}`)
+                      libExports.memberExpression(libExports.thisExpression(), libExports.identifier(child.instanceVar)),
+                      libExports.identifier("__geaUpdateProps")
                     ),
-                    []
+                    [
+                      libExports.callExpression(
+                        libExports.memberExpression(
+                          libExports.thisExpression(),
+                          libExports.identifier(`__buildProps_${child.instanceVar.replace(/^_/, "")}`)
+                        ),
+                        []
+                      )
+                    ]
                   )
                 )
               );
               if (existing && libExports.isBlockStatement(existing.body)) {
-                existing.body.body.push(...calls);
+                existing.body.body.unshift(...calls);
               } else {
                 const method = libExports.classMethod(
                   "method",
@@ -52939,7 +52918,7 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
               computationExpr: computationExprSafe ?? computationExpr
             };
             const propNames = getTemplatePropNames(classPath.node.body);
-            const methods = generateComponentArrayMethods(
+            const arrayResult = generateComponentArrayResult(
               um,
               arrayPropName,
               imports,
@@ -52949,11 +52928,9 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
               getTemplateParamIdentifier(classPath.node.body),
               tmplSetupCtx
             );
-            if (methods.length > 0 && templateMethod) {
-              methods.forEach((method) => classPath.node.body.body.push(method));
-              const importSource = imports.get(
-                isUnresolvedMapWithComponentChild(um, imports).componentTag
-              );
+            if (arrayResult && templateMethod) {
+              classPath.node.body.body.push(arrayResult.itemPropsMethod);
+              const importSource = imports.get(arrayResult.componentTag);
               if (importSource) {
                 const delegatedEvents = getHoistableRootEventsForImport(sourceFile, importSource).map((meta) => ({
                   eventType: meta.eventType,
@@ -52966,39 +52943,18 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                   appendCompiledEventMethods(classPath.node.body, delegatedEvents);
                 }
               }
-              ensureConstructorCalls(classPath.node.body, getComponentArrayBuildMethodName(arrayPropName));
-              if (storeArrayAccess) {
-                storeComponentArrayObservers.push({
-                  storeVar: storeArrayAccess.storeVar,
-                  refreshMethodName: getComponentArrayRefreshMethodName(arrayPropName),
-                  pathParts: [storeArrayAccess.propName]
-                });
-              } else if (arrayMap.storeVar) {
-                const refreshMethodName = getComponentArrayRefreshMethodName(arrayPropName);
-                mergeObserveMethod(
-                  buildObserveKey(arrayMap.arrayPathParts, arrayMap.storeVar),
-                  libExports.classMethod(
-                    "method",
-                    libExports.identifier(getObserveMethodName(arrayMap.arrayPathParts, arrayMap.storeVar)),
-                    [libExports.identifier("value"), libExports.identifier("change")],
-                    libExports.blockStatement([
-                      libExports.expressionStatement(
-                        libExports.callExpression(
-                          libExports.memberExpression(libExports.thisExpression(), libExports.identifier(refreshMethodName)),
-                          []
-                        )
-                      )
-                    ])
-                  )
-                );
-                storeComponentArrayObservers.push({
+              inlineIntoConstructor(classPath.node.body, [arrayResult.constructorInit]);
+              if (arrayMap.storeVar) {
+                observeListConfigs.push({
                   storeVar: arrayMap.storeVar,
-                  refreshMethodName,
-                  pathParts: arrayMap.arrayPathParts
+                  pathParts: arrayMap.arrayPathParts,
+                  arrayPropName,
+                  componentTag: arrayResult.componentTag,
+                  containerBindingId: arrayResult.containerBindingId,
+                  itemIdProperty: arrayResult.itemIdProperty
                 });
               }
               componentArrayDisposeTargets.push(getComponentArrayItemsName(arrayPropName));
-              componentArrayMountMethods.push(getComponentArrayMountMethodName(arrayPropName));
               const mapReplaceExpr = storeArrayAccess ? libExports.memberExpression(libExports.identifier(storeArrayAccess.storeVar), libExports.identifier(storeArrayAccess.propName)) : computationExpr;
               replaceMapWithComponentArrayItems(
                 templateMethod,
@@ -53132,50 +53088,6 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
               classPath.node.body.body.push(afterRenderMethod);
             }
           }
-          if (componentArrayMountMethods.length > 0) {
-            const mountCalls = componentArrayMountMethods.map(
-              (methodName) => libExports.expressionStatement(
-                libExports.callExpression(libExports.memberExpression(libExports.thisExpression(), libExports.identifier(methodName)), [])
-              )
-            );
-            const existingAfterRender = classPath.node.body.body.find(
-              (m) => libExports.isClassMethod(m) && libExports.isIdentifier(m.key) && m.key.name === "onAfterRender"
-            );
-            if (existingAfterRender) {
-              existingAfterRender.body.body.push(...mountCalls);
-            } else {
-              const afterRenderMethod = libExports.classMethod(
-                "method",
-                libExports.identifier("onAfterRender"),
-                [],
-                libExports.blockStatement([
-                  libExports.expressionStatement(
-                    libExports.callExpression(
-                      libExports.memberExpression(libExports.super(), libExports.identifier("onAfterRender")),
-                      []
-                    )
-                  ),
-                  ...mountCalls
-                ])
-              );
-              classPath.node.body.body.push(afterRenderMethod);
-            }
-            const rerenderOverride = libExports.classMethod(
-              "method",
-              libExports.identifier("__geaRequestRender"),
-              [],
-              libExports.blockStatement([
-                libExports.expressionStatement(
-                  libExports.callExpression(
-                    libExports.memberExpression(libExports.super(), libExports.identifier("__geaRequestRender")),
-                    []
-                  )
-                ),
-                ...mountCalls.map((stmt) => libExports.cloneNode(stmt, true))
-              ])
-            );
-            classPath.node.body.body.push(rerenderOverride);
-          }
           if (renderEventHandlers.length > 0) {
             applied = appendCompiledEventMethods(classPath.node.body, renderEventHandlers) || applied;
           }
@@ -53195,7 +53107,6 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
               }
               return importedStores.get(storeVar);
             };
-            const prevValueInits = [];
             addedMethods.forEach((_method, observeKey) => {
               const { parts, storeVar } = parseObserveKey(observeKey);
               if (!storeVar) {
@@ -53204,40 +53115,15 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                   const compGetterDeps = componentGetterStoreDeps.get(parts[0]);
                   if (compGetterDeps && compGetterDeps.length > 0) {
                     const originalMethodName = getObserveMethodName(parts);
-                    const wrapperMethodName = `${originalMethodName}__via`;
-                    if (!classPath.node.body.body.some(
-                      (m) => libExports.isClassMethod(m) && libExports.isIdentifier(m.key) && m.key.name === wrapperMethodName
-                    )) {
-                      classPath.node.body.body.push(
-                        libExports.classMethod(
-                          "method",
-                          libExports.identifier(wrapperMethodName),
-                          [libExports.identifier("_v"), libExports.identifier("change")],
-                          libExports.blockStatement([
-                            libExports.expressionStatement(
-                              libExports.callExpression(
-                                libExports.memberExpression(libExports.thisExpression(), libExports.identifier(originalMethodName)),
-                                [
-                                  libExports.memberExpression(libExports.thisExpression(), libExports.identifier(parts[0])),
-                                  libExports.nullLiteral()
-                                ]
-                              )
-                            )
-                          ])
-                        )
-                      );
-                    }
                     for (const dep of compGetterDeps) {
                       const depKey = buildObserveKey(dep.pathParts, dep.storeVar) + `__getter_${parts[0]}`;
                       ensureStoreGroup(dep.storeVar).observeHandlers.set(depKey, {
                         pathParts: dep.pathParts,
-                        methodName: wrapperMethodName
+                        methodName: originalMethodName,
+                        isVia: true,
+                        rereadExpr: libExports.memberExpression(libExports.thisExpression(), libExports.identifier(parts[0]))
                       });
                     }
-                    const compPrevProp = `__geaPrev_${originalMethodName}`;
-                    prevValueInits.push(
-                      js`try { this.${id(compPrevProp)} = this.${id(parts[0])}; } catch(_e) {}`
-                    );
                   }
                   return;
                 }
@@ -53249,37 +53135,15 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                 const getterDepPaths = storeRef?.getterDeps?.get(parts[0]);
                 if (getterDepPaths && getterDepPaths.length > 0) {
                   const originalMethodName = getObserveMethodName(parts, storeVar);
-                  const wrapperMethodName = `${originalMethodName}__via`;
-                  if (!classPath.node.body.body.some(
-                    (m) => libExports.isClassMethod(m) && libExports.isIdentifier(m.key) && m.key.name === wrapperMethodName
-                  )) {
-                    classPath.node.body.body.push(
-                      libExports.classMethod(
-                        "method",
-                        libExports.identifier(wrapperMethodName),
-                        [libExports.identifier("_v"), libExports.identifier("change")],
-                        libExports.blockStatement([
-                          libExports.expressionStatement(
-                            libExports.callExpression(libExports.memberExpression(libExports.thisExpression(), libExports.identifier(originalMethodName)), [
-                              libExports.memberExpression(libExports.identifier(storeVar), libExports.identifier(parts[0])),
-                              libExports.nullLiteral()
-                            ])
-                          )
-                        ])
-                      )
-                    );
-                  }
                   for (const depPath of getterDepPaths) {
                     const depKey = buildObserveKey(depPath, storeVar) + `__getter_${parts[0]}`;
                     ensureStoreGroup(storeVar).observeHandlers.set(depKey, {
                       pathParts: depPath,
-                      methodName: wrapperMethodName
+                      methodName: originalMethodName,
+                      isVia: true,
+                      rereadExpr: libExports.memberExpression(libExports.identifier(storeVar), libExports.identifier(parts[0]))
                     });
                   }
-                  const prevProp = `__geaPrev_${originalMethodName}`;
-                  prevValueInits.push(
-                    js`try { this.${id(prevProp)} = ${libExports.memberExpression(libExports.identifier(storeVar), libExports.identifier(parts[0]))}; } catch(_e) {}`
-                  );
                   return;
                 }
               }
@@ -53347,18 +53211,20 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
               const storeConfigs = Array.from(importedStores.entries()).map(([storeVar, config]) => ({
                 storeVar,
                 captureExpression: config.captureExpression,
-                observeHandlers: Array.from(config.observeHandlers.values()).map(({ pathParts, methodName }) => ({
+                observeHandlers: Array.from(config.observeHandlers.values()).map(({ pathParts, methodName, isVia, rereadExpr }) => ({
                   pathParts,
-                  methodName
+                  methodName,
+                  isVia,
+                  rereadExpr
                 }))
               }));
-              if (storeConfigs.length > 0 || mapRegistrations.length > 0) {
-                const createdHooksMethod = generateCreatedHooks(storeConfigs, htmlArrayMaps.length > 0);
+              for (const olc of observeListConfigs) {
+                ensureStoreGroup(olc.storeVar);
+              }
+              if (storeConfigs.length > 0 || mapRegistrations.length > 0 || observeListConfigs.length > 0) {
+                const createdHooksMethod = generateCreatedHooks(storeConfigs, htmlArrayMaps.length > 0, observeListConfigs);
                 if (mapRegistrations.length > 0) {
                   createdHooksMethod.body.body.push(...mapRegistrations);
-                }
-                if (prevValueInits.length > 0) {
-                  createdHooksMethod.body.body.push(...prevValueInits);
                 }
                 classPath.node.body.body.push(createdHooksMethod);
               }
@@ -53678,15 +53544,7 @@ function replaceMapWithComponentArrayItems(templateMethod, arrayExpr, itemsName)
         toReplace = path.parentPath.parentPath;
       }
       const itemsAccess = libExports.memberExpression(libExports.thisExpression(), libExports.identifier(itemsName));
-      const mapCallback = libExports.arrowFunctionExpression(
-        [libExports.identifier("__item")],
-        libExports.templateLiteral(
-          [libExports.templateElement({ raw: "", cooked: "" }), libExports.templateElement({ raw: "", cooked: "" })],
-          [libExports.identifier("__item")]
-        )
-      );
-      const mapCall = libExports.callExpression(libExports.memberExpression(itemsAccess, libExports.identifier("map")), [mapCallback]);
-      const joinCall = libExports.callExpression(libExports.memberExpression(mapCall, libExports.identifier("join")), [libExports.stringLiteral("")]);
+      const joinCall = libExports.callExpression(libExports.memberExpression(itemsAccess, libExports.identifier("join")), [libExports.stringLiteral("")]);
       toReplace.replaceWith(joinCall);
       replaced = true;
     }
@@ -53706,23 +53564,6 @@ function inlineIntoConstructor(classBody, statements) {
     return;
   }
   ctor.body.body.push(...statements);
-}
-function ensureConstructorCalls(classBody, methodName) {
-  let ctor = classBody.body.find(
-    (member) => libExports.isClassMethod(member) && libExports.isIdentifier(member.key) && member.key.name === "constructor"
-  );
-  if (!ctor) {
-    ctor = appendToBody(
-      jsMethod`${id("constructor")}(...args) {}`,
-      libExports.expressionStatement(libExports.callExpression(libExports.super(), [libExports.spreadElement(libExports.identifier("args"))])),
-      libExports.expressionStatement(libExports.callExpression(libExports.memberExpression(libExports.thisExpression(), libExports.identifier(methodName)), []))
-    );
-    classBody.body.unshift(ctor);
-    return;
-  }
-  ctor.body.body.push(
-    libExports.expressionStatement(libExports.callExpression(libExports.memberExpression(libExports.thisExpression(), libExports.identifier(methodName)), []))
-  );
 }
 function ensureDisposeCalls(classBody, targets) {
   const disposeStatements = targets.map(
@@ -53791,28 +53632,50 @@ function ensureOnPropChangeMethod(classBody, inlinePatchBodies, compiledChildren
       nonDirectChildren.push(child);
     }
   }
-  const childRefreshMethodNames = nonDirectChildren.filter((child) => child.dependencies.some((dep) => !dep.storeVar && dep.pathParts[0] === "props")).map((child) => `__refreshChildProps_${child.instanceVar.replace(/^_/, "")}`);
-  const arrayRefreshMethodNames = arrayRefreshDeps.filter((d) => d.propNames.length > 0).map((d) => d.methodName);
-  const refreshMethodNames = [.../* @__PURE__ */ new Set([...childRefreshMethodNames, ...arrayRefreshMethodNames])];
-  const refreshPropDeps = /* @__PURE__ */ new Map();
-  for (const child of nonDirectChildren) {
-    const methodName = `__refreshChildProps_${child.instanceVar.replace(/^_/, "")}`;
+  const childRefreshEntries = nonDirectChildren.filter((child) => child.dependencies.some((dep) => !dep.storeVar && dep.pathParts[0] === "props")).map((child) => {
     const depProps = /* @__PURE__ */ new Set();
     for (const dep of child.dependencies) {
       if (!dep.storeVar && dep.pathParts[0] === "props" && dep.pathParts.length > 1) {
         depProps.add(dep.pathParts[1]);
       }
     }
-    if (depProps.size > 0) {
-      refreshPropDeps.set(methodName, depProps);
-    }
-  }
+    return { child, depProps };
+  });
+  const arrayRefreshMethodNames = arrayRefreshDeps.filter((d) => d.propNames.length > 0).map((d) => d.methodName);
+  const refreshPropDeps = /* @__PURE__ */ new Map();
   for (const { methodName, propNames } of arrayRefreshDeps) {
     if (propNames.length > 0) {
       refreshPropDeps.set(methodName, new Set(propNames));
     }
   }
-  const refreshCalls = refreshMethodNames.map((name) => {
+  const childRefreshCalls = childRefreshEntries.map(({ child, depProps }) => {
+    const call = libExports.expressionStatement(
+      libExports.callExpression(
+        libExports.memberExpression(
+          libExports.memberExpression(libExports.thisExpression(), libExports.identifier(child.instanceVar)),
+          libExports.identifier("__geaUpdateProps")
+        ),
+        [
+          libExports.callExpression(
+            libExports.memberExpression(
+              libExports.thisExpression(),
+              libExports.identifier(`__buildProps_${child.instanceVar.replace(/^_/, "")}`)
+            ),
+            []
+          )
+        ]
+      )
+    );
+    if (depProps.size > 0) {
+      const guard = Array.from(depProps).reduce((acc, prop) => {
+        const test = libExports.binaryExpression("===", libExports.identifier("key"), libExports.stringLiteral(prop));
+        return acc ? libExports.logicalExpression("||", acc, test) : test;
+      }, void 0);
+      return libExports.ifStatement(guard, call);
+    }
+    return call;
+  });
+  const arrayRefreshCalls = arrayRefreshMethodNames.map((name) => {
     const deps = refreshPropDeps.get(name);
     const call = libExports.expressionStatement(libExports.callExpression(libExports.memberExpression(libExports.thisExpression(), libExports.identifier(name)), []));
     if (deps && deps.size > 0) {
@@ -53824,6 +53687,7 @@ function ensureOnPropChangeMethod(classBody, inlinePatchBodies, compiledChildren
     }
     return call;
   });
+  const refreshCalls = [...childRefreshCalls, ...arrayRefreshCalls];
   const condPatchCalls = [];
   if (conditionalSlots.length > 0) {
     for (let i = 0; i < conditionalSlots.length; i++) {
@@ -54418,6 +54282,27 @@ function generateStateChildSwapMethod(classBody, stateChildSlots) {
       setupStatements.push(libExports.cloneNode(stmt, true));
     }
   }
+  const propsUpdateCalls = stateChildSlots.map((slot) => {
+    const buildPropsName = `__buildProps_${slot.childInstanceVar.replace(/^_/, "")}`;
+    const hasBuildProps = classBody.body.some(
+      (m) => libExports.isClassMethod(m) && libExports.isIdentifier(m.key) && m.key.name === buildPropsName
+    );
+    if (!hasBuildProps) return null;
+    return libExports.expressionStatement(
+      libExports.callExpression(
+        libExports.memberExpression(
+          libExports.memberExpression(libExports.thisExpression(), libExports.identifier(slot.childInstanceVar)),
+          libExports.identifier("__geaUpdateProps")
+        ),
+        [
+          libExports.callExpression(
+            libExports.memberExpression(libExports.thisExpression(), libExports.identifier(buildPropsName)),
+            []
+          )
+        ]
+      )
+    );
+  }).filter(Boolean);
   const swapCalls = stateChildSlots.map((slot) => {
     const guardClone = libExports.cloneNode(slot.guardExpr, true);
     return libExports.expressionStatement(
@@ -54426,17 +54311,17 @@ function generateStateChildSwapMethod(classBody, stateChildSlots) {
         libExports.logicalExpression(
           "&&",
           guardClone,
-          libExports.callExpression(libExports.memberExpression(libExports.thisExpression(), libExports.identifier(slot.ensureMethodName)), [])
+          libExports.memberExpression(libExports.thisExpression(), libExports.identifier(slot.childInstanceVar))
         )
       ])
     );
   });
-  const filteredSetup = pruneUnusedSetupDestructuring(setupStatements, swapCalls);
+  const filteredSetup = pruneUnusedSetupDestructuring(setupStatements, [...propsUpdateCalls, ...swapCalls]);
   const method = libExports.classMethod(
     "method",
     libExports.identifier("__geaSwapStateChildren"),
     [],
-    libExports.blockStatement([...filteredSetup, ...swapCalls])
+    libExports.blockStatement([...filteredSetup, ...propsUpdateCalls, ...swapCalls])
   );
   classBody.body.push(method);
 }

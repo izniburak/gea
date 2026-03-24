@@ -1341,6 +1341,7 @@ var Component = class Component extends Store {
 	}
 	constructor(props = {}) {
 		super();
+		this.__elCache = /* @__PURE__ */ new Map();
 		this.id_ = ComponentManager.getInstance().getUid();
 		this.element_ = null;
 		this.__bindings = [];
@@ -1470,7 +1471,11 @@ var Component = class Component extends Store {
 				const prev = target[prop];
 				target[prop] = value;
 				if (typeof component.__onPropChange === "function") {
-					if (value !== prev || typeof prev === "object" && prev !== null) component.__onPropChange(prop, value);
+					if (value !== prev || typeof prev === "object" && prev !== null) try {
+						component.__onPropChange(prop, value);
+					} catch (err) {
+						console.error(err);
+					}
 				}
 				return true;
 			}
@@ -1536,6 +1541,7 @@ var Component = class Component extends Store {
 			});
 			this.__childComponents = [];
 		}
+		this.__elCache.clear();
 		const placeholder = document.createComment("");
 		parent.insertBefore(placeholder, this.element_);
 		parent.removeChild(this.element_);
@@ -1663,6 +1669,89 @@ var Component = class Component extends Store {
 			child.onAfterRender();
 			child.onAfterRenderHooks();
 			requestAnimationFrame(() => child.onAfterRenderAsync());
+		});
+	}
+	__child(Ctor, props, key) {
+		const child = new Ctor(props);
+		child.parentComponent = this;
+		child.__geaCompiledChild = true;
+		if (key !== void 0) child.__geaItemKey = String(key);
+		if (!this.__childComponents.includes(child)) this.__childComponents.push(child);
+		return child;
+	}
+	__el(suffix) {
+		let el = this.__elCache.get(suffix) ?? null;
+		if (!el || !el.isConnected) {
+			el = document.getElementById(this.id_ + "-" + suffix);
+			if (el) this.__elCache.set(suffix, el);
+			else this.__elCache.delete(suffix);
+		}
+		return el;
+	}
+	__updateText(suffix, text) {
+		const el = this.__el(suffix);
+		if (el) el.textContent = text;
+	}
+	__observe(store, path, handler) {
+		const remover = store.__store.observe(path, handler.bind(this));
+		this.__observer_removers__.push(remover);
+	}
+	__reorderChildren(container, items) {
+		if (!container || !this.rendered_) return;
+		for (const item of items) if (!item.rendered_) {
+			if (!this.__childComponents.includes(item)) this.__childComponents.push(item);
+			item.render(container);
+		}
+		let cursor = container.firstChild;
+		for (const item of items) {
+			let el = item.element_;
+			if (!el) continue;
+			while (el.parentElement && el.parentElement !== container) el = el.parentElement;
+			if (el !== cursor) container.insertBefore(el, cursor || null);
+			else cursor = cursor.nextSibling;
+		}
+	}
+	__reconcileList(oldItems, newData, container, Ctor, propsFactory, keyExtractor) {
+		const oldByKey = /* @__PURE__ */ new Map();
+		for (const item of oldItems) if (item.__geaItemKey != null) oldByKey.set(item.__geaItemKey, item);
+		const next = newData.map((data) => {
+			const key = String(keyExtractor(data));
+			const existing = oldByKey.get(key);
+			if (existing) {
+				existing.__geaUpdateProps(propsFactory(data));
+				oldByKey.delete(key);
+				return existing;
+			}
+			return this.__child(Ctor, propsFactory(data), key);
+		});
+		for (const removed of oldByKey.values()) removed.dispose?.();
+		this.__reorderChildren(container, next);
+		this.__childComponents = this.__childComponents.filter((child) => !oldItems.includes(child) || next.includes(child));
+		return next;
+	}
+	__observeList(store, path, config) {
+		this.__observe(store, path, (_value, changes) => {
+			const storeData = store.__store;
+			const arr = path.reduce((obj, key) => obj?.[key], storeData) ?? [];
+			if (changes.every((c) => c.isArrayItemPropUpdate)) for (const c of changes) {
+				const item = config.items[c.arrayIndex];
+				if (item) item.__geaUpdateProps(config.props(arr[c.arrayIndex]));
+			}
+			else if (changes.length === 1 && changes[0].type === "append") {
+				const { start, count } = changes[0];
+				const container = config.container();
+				for (let i = 0; i < count; i++) {
+					const data = arr[start + i];
+					const item = this.__child(config.Ctor, config.props(data), config.key(data));
+					config.items.push(item);
+					if (this.rendered_ && container) item.render(container);
+				}
+			} else {
+				const newItems = this.__reconcileList(config.items, arr, config.container(), config.Ctor, config.props, config.key);
+				config.items.length = 0;
+				config.items.push(...newItems);
+			}
+			config.onchange?.();
 		});
 	}
 	__geaSwapChild(markerId, newChild) {

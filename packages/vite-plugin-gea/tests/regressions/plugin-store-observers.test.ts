@@ -31,8 +31,8 @@ test('static reactivity wires subscriptions for every imported store used by a c
     }
   `)
 
-  assert.match(output, /counterStore\.__store\.observe/)
-  assert.match(output, /filterStore\.__store\.observe/)
+  assert.match(output, /this\.__observe\(counterStore,/)
+  assert.match(output, /this\.__observe\(filterStore,/)
 })
 
 test('static reactivity detects default Store imports across files', async () => {
@@ -65,8 +65,8 @@ export default class DashboardStore extends Store {
     )
 
     assert.ok(output)
-    assert.match(output, /store\.__store\.observe/)
-    assert.match(output, /observe\(\["count"\]/)
+    assert.match(output, /this\.__observe\(store,/)
+    assert.match(output, /\["count"\]/)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -102,8 +102,8 @@ test('imported store array text bindings inject id on stats element for getEleme
     'todo-stats div must have id attribute for getElementById lookup',
   )
   assert.ok(
-    /getElementById\([^)]*this\.id[^)]*\+[^)]*"-b\d"\)/.test(output),
-    'stats binding must use getElementById, not this.$(selector) fallback',
+    /this\.__updateText\('b\d'/.test(output),
+    'stats binding must use __updateText helper, not inline getElementById',
   )
 })
 
@@ -305,11 +305,11 @@ export default class TodoStore extends Store {
     )
 
     assert.ok(output)
-    assert.match(output, /observe\(\["filter"\]/, 'state property should observe specific path')
-    assert.match(output, /observe\(\["todos"\]/, 'store getter should observe its actual state dependency')
-    assert.doesNotMatch(output, /observe\(\["activeCount"\]/, 'should not observe getter name as path')
-    assert.doesNotMatch(output, /observe\(\["completedCount"\]/, 'should not observe getter name as path')
-    assert.doesNotMatch(output, /observe\(\[\]/, 'should not use root observer when getter deps are known')
+    assert.match(output, /\["filter"\]/, 'state property should observe specific path')
+    assert.match(output, /\["todos"\]/, 'store getter should observe its actual state dependency')
+    assert.doesNotMatch(output, /\["activeCount"\]/, 'should not observe getter name as path')
+    assert.doesNotMatch(output, /\["completedCount"\]/, 'should not observe getter name as path')
+    assert.doesNotMatch(output, /__observe\([^,]+,\s*\[\]/, 'should not use root observer when getter deps are known')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -353,9 +353,9 @@ export default new CounterStore()`,
     )
 
     assert.ok(output)
-    assert.match(output, /observe\(\["count"\]/, 'count should be observed directly')
-    assert.doesNotMatch(output, /observe\(\["doubled"\]/, 'should not observe getter name as path')
-    assert.match(output, /__via/, 'should generate wrapper method for getter re-evaluation')
+    assert.match(output, /\["count"\]/, 'count should be observed directly')
+    assert.doesNotMatch(output, /\["doubled"\]/, 'should not observe getter name as path')
+    assert.match(output, /counterStore\.doubled/, 'should inline re-read of getter value in merged observer')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -401,8 +401,8 @@ export default class TodoStore extends Store {
     const methodSlice = output.slice(methodStart, methodStart + 300)
     assert.match(
       methodSlice,
-      /__refreshChildProps_todoFilters/,
-      'observer should call child prop refresh, not __geaRequestRender',
+      /this\._todoFilters\.__geaUpdateProps\(this\.__buildProps_todoFilters\(\)\)/,
+      'observer should call child prop update, not __geaRequestRender',
     )
     assert.doesNotMatch(methodSlice, /__geaRequestRender/, 'observer must not trigger a full re-render')
   } finally {
@@ -430,8 +430,8 @@ test('component class getters that access stores create observers for underlying
     }
   `)
 
-  assert.match(output, /routeStore\.__store/, 'compiler must observe routeStore when a component getter accesses it')
-  assert.match(output, /observe\(.*path/, 'observer must be registered for the underlying store path the getter reads')
+  assert.match(output, /this\.__observe\(routeStore/, 'compiler must observe routeStore when a component getter accesses it')
+  assert.match(output, /\["path"\]/, 'observer must be registered for the underlying store path the getter reads')
 })
 
 test('transitive getter-to-getter deps produce __via observers for underlying store paths', () => {
@@ -471,21 +471,30 @@ test('transitive getter-to-getter deps produce __via observers for underlying st
     }
   `)
 
-  assert.match(output, /__observe_local_isBoard__via/, 'isBoard (direct store dep) must get a __via observer')
   assert.match(
     output,
-    /__observe_local_showIssueDetail__via/,
-    'showIssueDetail (transitive via issueMatch → routeStore.path) must get a __via observer',
+    /this\.__observe_local_isBoard\(this\.isBoard, null\)/,
+    'isBoard (direct store dep) must have inline re-read in merged observer',
   )
   assert.match(
     output,
-    /__observe_local_issueId__via/,
-    'issueId (transitive via issueMatch → routeStore.path) must get a __via observer',
+    /this\.__observe_local_showIssueDetail\(this\.showIssueDetail, null\)/,
+    'showIssueDetail (transitive via issueMatch → routeStore.path) must have inline re-read in merged observer',
+  )
+  assert.match(
+    output,
+    /this\.__observe_local_issueId\(this\.issueId, null\)/,
+    'issueId (transitive via issueMatch → routeStore.path) must have inline re-read in merged observer',
   )
   assert.doesNotMatch(
     output,
     /__geaRequestRender/,
     'no fallback full re-render should be generated when all deps resolve to store observers',
+  )
+  assert.doesNotMatch(
+    output,
+    /__via/,
+    'no __via wrapper methods should be generated — re-reads are inlined in merged observer',
   )
 })
 
@@ -509,7 +518,7 @@ test('component getter reading this.props registers deps for this.getter in temp
   assert.match(output, /key === "options"/, 'getter reads this.props.options — options must trigger prop patch')
 })
 
-test('observer calls __refreshChildProps when guard-dependent props reference the store', () => {
+test('observer calls __geaUpdateProps when guard-dependent props reference the store', () => {
   const output = transformComponentSource(`
     import { Component } from '@geajs/core'
     import projectStore from './project-store'
@@ -535,8 +544,8 @@ test('observer calls __refreshChildProps when guard-dependent props reference th
 
   assert.match(
     observerMatch![0],
-    /__refreshChildProps_icon/,
-    'observer must call __refreshChildProps_icon to update the child when the guard dependency changes',
+    /this\._icon\.__geaUpdateProps\(this\.__buildProps_icon\(\)\)/,
+    'observer must call this._icon.__geaUpdateProps to update the child when the guard dependency changes',
   )
 })
 
@@ -635,7 +644,8 @@ test('store-alias nested field must produce inline patch or rerender observer (s
     assert.ok(
       observerMatch[0].includes('__patchNode') ||
         observerMatch[0].includes('__geaRequestRender') ||
-        observerMatch[0].includes('textContent'),
+        observerMatch[0].includes('textContent') ||
+        observerMatch[0].includes('__updateText'),
       'observer must contain patch logic or rerender. Got: ' + observerMatch[0],
     )
   }

@@ -307,6 +307,8 @@ export default class Component extends Store {
       this.__childComponents = []
     }
 
+    this.__elCache.clear()
+
     // Remove old element BEFORE calling template() so that getElementById
     // inside child __geaUpdateProps won't find stale DOM nodes.
     const placeholder = document.createComment('')
@@ -481,6 +483,154 @@ export default class Component extends Store {
       child.onAfterRender()
       child.onAfterRenderHooks()
       requestAnimationFrame(() => child.onAfterRenderAsync())
+    })
+  }
+
+  __child<T extends Component>(Ctor: new (props: any) => T, props: any, key?: any): T {
+    const child = new Ctor(props)
+    child.parentComponent = this
+    child.__geaCompiledChild = true
+    if (key !== undefined) {
+      child.__geaItemKey = String(key)
+    }
+    if (!this.__childComponents.includes(child)) {
+      this.__childComponents.push(child)
+    }
+    return child
+  }
+
+  __elCache = new Map<string, HTMLElement>()
+
+  __el(suffix: string): HTMLElement | null {
+    let el = this.__elCache.get(suffix) ?? null
+    if (!el || !el.isConnected) {
+      el = document.getElementById(this.id_ + '-' + suffix)
+      if (el) this.__elCache.set(suffix, el)
+      else this.__elCache.delete(suffix)
+    }
+    return el
+  }
+
+  __updateText(suffix: string, text: string): void {
+    const el = this.__el(suffix)
+    if (el) el.textContent = text
+  }
+
+  __observe(store: any, path: string[], handler: (value: any, changes: any[]) => void): void {
+    const remover = store.__store.observe(path, handler.bind(this))
+    this.__observer_removers__.push(remover)
+  }
+
+  __reorderChildren(container: HTMLElement | null, items: Component[]): void {
+    if (!container || !this.rendered_) return
+    for (const item of items) {
+      if (!item.rendered_) {
+        if (!this.__childComponents.includes(item)) {
+          this.__childComponents.push(item)
+        }
+        item.render(container)
+      }
+    }
+    let cursor = container.firstChild
+    for (const item of items) {
+      let el = item.element_
+      if (!el) continue
+      while (el.parentElement && el.parentElement !== container) el = el.parentElement
+      if (el !== cursor) {
+        container.insertBefore(el, cursor || null)
+      } else {
+        cursor = cursor.nextSibling
+      }
+    }
+  }
+
+  __reconcileList(
+    oldItems: Component[],
+    newData: any[],
+    container: HTMLElement | null,
+    Ctor: new (props: any) => Component,
+    propsFactory: (item: any) => any,
+    keyExtractor: (item: any) => any,
+  ): Component[] {
+    const oldByKey = new Map<string, Component>()
+    for (const item of oldItems) {
+      if (item.__geaItemKey != null) oldByKey.set(item.__geaItemKey, item)
+    }
+
+    const next = newData.map(data => {
+      const key = String(keyExtractor(data))
+      const existing = oldByKey.get(key)
+      if (existing) {
+        existing.__geaUpdateProps(propsFactory(data))
+        oldByKey.delete(key)
+        return existing
+      }
+      return this.__child(Ctor, propsFactory(data), key)
+    })
+
+    for (const removed of oldByKey.values()) {
+      removed.dispose?.()
+    }
+
+    this.__reorderChildren(container, next)
+
+    // Clean up __childComponents
+    this.__childComponents = this.__childComponents.filter(
+      child => !oldItems.includes(child) || next.includes(child)
+    )
+
+    return next
+  }
+
+  __observeList(
+    store: any,
+    path: string[],
+    config: {
+      items: Component[]
+      container: () => HTMLElement | null
+      Ctor: new (props: any) => Component
+      props: (item: any) => any
+      key: (item: any) => any
+      onchange?: () => void
+    },
+  ): void {
+    this.__observe(store, path, (_value, changes) => {
+      const storeData = store.__store
+      const arr = path.reduce((obj: any, key: string) => obj?.[key], storeData) ?? []
+
+      if (changes.every((c: any) => c.isArrayItemPropUpdate)) {
+        // Item property update (e.g. todo.done toggled)
+        for (const c of changes) {
+          const item = config.items[c.arrayIndex]
+          if (item) {
+            item.__geaUpdateProps(config.props(arr[c.arrayIndex]))
+          }
+        }
+      } else if (changes.length === 1 && changes[0].type === 'append') {
+        // Append (push)
+        const { start, count } = changes[0]
+        const container = config.container()
+        for (let i = 0; i < count; i++) {
+          const data = arr[start + i]
+          const item = this.__child(config.Ctor, config.props(data), config.key(data))
+          config.items.push(item)
+          if (this.rendered_ && container) item.render(container)
+        }
+      } else {
+        // Full replace (filter, sort, reassign)
+        const newItems = this.__reconcileList(
+          config.items,
+          arr,
+          config.container(),
+          config.Ctor,
+          config.props,
+          config.key,
+        )
+        config.items.length = 0
+        config.items.push(...newItems)
+      }
+
+      config.onchange?.()
     })
   }
 

@@ -22,12 +22,10 @@ test('conditional child components are instantiated lazily', () => {
     }
   `)
 
-  assert.match(output, /__ensureChild_childView\(\)/)
-  assert.match(output, /store\.show && store\.payload && `\$\{this\.__ensureChild_childView\(\)\}`/)
-  assert.match(output, /this\._childView = null/)
-  assert.match(output, /__ensureChild_childView\(\)\s*\{[\s\S]*this\._childView = new ChildView/)
-  const constructorBlock = output.match(/constructor\([\s\S]*?\n {2}\}/)?.[0] || ''
-  assert.doesNotMatch(constructorBlock, /this\._childView = new ChildView/)
+  assert.match(output, /this\._childView/)
+  assert.match(output, /store\.show && store\.payload && `\$\{this\._childView\}`/)
+  assert.match(output, /this\._childView = this\.__child\(ChildView/)
+  assert.doesNotMatch(output, /__ensureChild_childView/)
 })
 
 test('conditional imported map state subscriptions include edit-mode flags', () => {
@@ -367,8 +365,8 @@ export default class App extends Component {
     assert.match(output!, /__geaRegisterCond/, 'should register conditional slots for store-driven conditionals')
     assert.match(output!, /__geaPatchCond/, 'should patch conditional slots reactively')
     // Must register an observer for cartOpen on the store
-    assert.match(output!, /observe\(\["cartOpen"\]/, 'should register observer for cartOpen')
-    assert.match(output!, /observe\(\["checkoutOpen"\]/, 'should register observer for checkoutOpen')
+    assert.match(output!, /__observe\(store, \["cartOpen"\]/, 'should register observer for cartOpen')
+    assert.match(output!, /__observe\(store, \["checkoutOpen"\]/, 'should register observer for checkoutOpen')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

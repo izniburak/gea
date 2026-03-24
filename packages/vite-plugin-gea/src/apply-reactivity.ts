@@ -18,12 +18,14 @@ import { generateCreateItemMethod } from './generate-array-patch.ts'
 import { ITEM_IS_KEY } from './analyze-helpers.ts'
 import {
   generateComponentArrayMethods,
+  generateComponentArrayResult,
   getComponentArrayBuildMethodName,
   getComponentArrayItemsName,
   getComponentArrayMountMethodName,
   getComponentArrayRefreshMethodName,
   isUnresolvedMapWithComponentChild,
 } from './generate-array-slot-sync.ts'
+import type { ComponentArrayResult } from './generate-array-slot-sync.ts'
 import { childHasNoProps } from './generate-components.ts'
 import { getHoistableRootEventsForImport } from './component-event-helpers.ts'
 import { appendCompiledEventMethods } from './generate-events.ts'
@@ -76,9 +78,17 @@ function generateCreatedHooks(
   stores: Array<{
     storeVar: string
     captureExpression: t.Expression
-    observeHandlers: Array<{ pathParts: PathParts; methodName: string }>
+    observeHandlers: Array<{ pathParts: PathParts; methodName: string; isVia?: boolean; rereadExpr?: t.Expression }>
   }>,
   hasArrayConfigs: boolean,
+  observeListConfigs: Array<{
+    storeVar: string
+    pathParts: PathParts
+    arrayPropName: string
+    componentTag: string
+    containerBindingId?: string
+    itemIdProperty?: string
+  }> = [],
 ): t.ClassMethod {
   const body: t.Statement[] = []
 
@@ -86,31 +96,185 @@ function generateCreatedHooks(
     body.push(js`this.__ensureArrayConfigs();`)
   }
 
-  const observeExprs: t.Expression[] = []
+  // Collect all observe handlers and group by store+path, including
+  // those that should become onchange callbacks for __observeList
+  const observeListPathKeys = new Set<string>()
+  for (const config of observeListConfigs) {
+    observeListPathKeys.add(`${config.storeVar}:${JSON.stringify(config.pathParts)}`)
+  }
+
   for (const store of stores) {
-    for (const observeHandler of store.observeHandlers) {
-      observeExprs.push(
-        jsExpr`
-          ${t.cloneNode(store.captureExpression, true)}.observe(
-            ${t.arrayExpression(observeHandler.pathParts.map((part) => t.stringLiteral(part)))},
-            this.${id(observeHandler.methodName)}.bind(this)
-          )
-        `,
+    // Group handlers by path to merge duplicate observers
+    const byPath = new Map<string, Array<{ methodName: string; isVia?: boolean; rereadExpr?: t.Expression }>>()
+    for (const handler of store.observeHandlers) {
+      const pathKey = JSON.stringify(handler.pathParts)
+      // Skip handlers whose path is covered by __observeList — they'll be
+      // merged into the onchange callback below
+      const listKey = `${store.storeVar}:${pathKey}`
+      if (observeListPathKeys.has(listKey)) continue
+      if (!byPath.has(pathKey)) byPath.set(pathKey, [])
+      byPath.get(pathKey)!.push({ methodName: handler.methodName, isVia: handler.isVia, rereadExpr: handler.rereadExpr })
+    }
+
+    // The store variable expression (e.g. `storeVar` identifier)
+    const storeVarExpr = t.identifier(store.storeVar)
+
+    for (const [pathKey, handlers] of byPath) {
+      const pathParts: PathParts = JSON.parse(pathKey)
+      const pathArray = t.arrayExpression(pathParts.map((part) => t.stringLiteral(part)))
+
+      if (handlers.length === 1 && !handlers[0].isVia) {
+        // Single handler — direct method reference
+        body.push(
+          t.expressionStatement(
+            t.callExpression(
+              t.memberExpression(t.thisExpression(), t.identifier('__observe')),
+              [
+                storeVarExpr,
+                pathArray,
+                t.memberExpression(t.thisExpression(), t.identifier(handlers[0].methodName)),
+              ],
+            ),
+          ),
+        )
+      } else {
+        // Multiple handlers or via handlers — merged arrow function
+        const vParam = t.identifier('__v')
+        const cParam = t.identifier('__c')
+        const callStmts: t.Statement[] = []
+        for (const h of handlers) {
+          if (h.isVia && h.rereadExpr) {
+            // Inline re-read: call target method with re-read value
+            callStmts.push(
+              t.expressionStatement(
+                t.callExpression(
+                  t.memberExpression(t.thisExpression(), t.identifier(h.methodName)),
+                  [t.cloneNode(h.rereadExpr, true), t.nullLiteral()],
+                ),
+              ),
+            )
+          } else {
+            callStmts.push(
+              t.expressionStatement(
+                t.callExpression(
+                  t.memberExpression(t.thisExpression(), t.identifier(h.methodName)),
+                  [vParam, cParam],
+                ),
+              ),
+            )
+          }
+        }
+        body.push(
+          t.expressionStatement(
+            t.callExpression(
+              t.memberExpression(t.thisExpression(), t.identifier('__observe')),
+              [
+                storeVarExpr,
+                pathArray,
+                t.arrowFunctionExpression(
+                  [vParam, cParam],
+                  t.blockStatement(callStmts),
+                ),
+              ],
+            ),
+          ),
+        )
+      }
+    }
+
+    // Generate __observeList calls for component array slots on this store
+    for (const config of observeListConfigs.filter((c) => c.storeVar === store.storeVar)) {
+      const pathArray = t.arrayExpression(config.pathParts.map((part) => t.stringLiteral(part)))
+      const itemsName = getComponentArrayItemsName(config.arrayPropName)
+      const itemPropsMethodName = `__itemProps_${config.arrayPropName}`
+
+      // Build the config object for __observeList
+      const configProps: t.ObjectProperty[] = [
+        t.objectProperty(
+          t.identifier('items'),
+          t.memberExpression(t.thisExpression(), t.identifier(itemsName)),
+        ),
+        t.objectProperty(
+          t.identifier('container'),
+          t.arrowFunctionExpression(
+            [],
+            config.containerBindingId
+              ? t.callExpression(
+                  t.memberExpression(t.thisExpression(), t.identifier('__el')),
+                  [t.stringLiteral(config.containerBindingId)],
+                )
+              : (jsExpr`this.$(":scope")` as t.Expression),
+          ),
+        ),
+        t.objectProperty(t.identifier('Ctor'), t.identifier(config.componentTag)),
+        t.objectProperty(
+          t.identifier('props'),
+          t.arrowFunctionExpression(
+            [t.identifier('opt')],
+            t.callExpression(
+              t.memberExpression(t.thisExpression(), t.identifier(itemPropsMethodName)),
+              [t.identifier('opt')],
+            ),
+          ),
+        ),
+        t.objectProperty(
+          t.identifier('key'),
+          config.itemIdProperty && config.itemIdProperty !== ITEM_IS_KEY
+            ? t.arrowFunctionExpression(
+                [t.identifier('opt')],
+                t.memberExpression(t.identifier('opt'), t.identifier(config.itemIdProperty)),
+              )
+            : config.itemIdProperty === ITEM_IS_KEY
+              ? t.arrowFunctionExpression([t.identifier('opt')], t.identifier('opt'))
+              : t.arrowFunctionExpression(
+                  [t.identifier('opt'), t.identifier('__k')],
+                  t.binaryExpression('+', t.stringLiteral('__idx_'), t.identifier('__k')),
+                ),
+        ),
+      ]
+
+      // Merge any scalar observers on the same path into the onchange callback
+      const samePathHandlers: Array<{ methodName: string; isVia?: boolean; rereadExpr?: t.Expression }> = []
+      const pathKey = JSON.stringify(config.pathParts)
+      for (const handler of store.observeHandlers) {
+        if (JSON.stringify(handler.pathParts) === pathKey) {
+          samePathHandlers.push(handler)
+        }
+      }
+      if (samePathHandlers.length > 0) {
+        const onchangeStmts: t.Statement[] = samePathHandlers.map((h) =>
+          t.expressionStatement(
+            h.isVia && h.rereadExpr
+              ? t.callExpression(
+                  t.memberExpression(t.thisExpression(), t.identifier(h.methodName)),
+                  [t.cloneNode(h.rereadExpr, true), t.nullLiteral()],
+                )
+              : t.callExpression(
+                  t.memberExpression(t.thisExpression(), t.identifier(h.methodName)),
+                  [
+                    t.memberExpression(t.identifier(config.storeVar), t.identifier(config.pathParts[0])),
+                    t.nullLiteral(),
+                  ],
+                ),
+          ),
+        )
+        configProps.push(
+          t.objectProperty(
+            t.identifier('onchange'),
+            t.arrowFunctionExpression([], t.blockStatement(onchangeStmts)),
+          ),
+        )
+      }
+
+      body.push(
+        t.expressionStatement(
+          t.callExpression(
+            t.memberExpression(t.thisExpression(), t.identifier('__observeList')),
+            [storeVarExpr, pathArray, t.objectExpression(configProps)],
+          ),
+        ),
       )
     }
-  }
-  if (observeExprs.length > 0) {
-    body.push(
-      t.expressionStatement(
-        t.callExpression(
-          t.memberExpression(
-            t.memberExpression(t.thisExpression(), t.identifier('__observer_removers__')),
-            t.identifier('push'),
-          ),
-          observeExprs,
-        ),
-      ),
-    )
   }
 
   const method = jsMethod`${id('createdHooks')}() {}`
@@ -129,26 +293,16 @@ function generateLocalStateObserverSetup(
   }
   body.push(js`if (!${localStore}) { return; }`)
 
-  const observeExprs: t.Expression[] = []
-  observeHandlers.forEach((observeHandler) => {
-    observeExprs.push(
-      jsExpr`
-        ${localStore}.observe(
-          ${t.arrayExpression(observeHandler.pathParts.map((part) => t.stringLiteral(part)))},
-          this.${id(observeHandler.methodName)}.bind(this)
-        )
-      `,
-    )
-  })
-  if (observeExprs.length > 0) {
+  for (const observeHandler of observeHandlers) {
     body.push(
       t.expressionStatement(
         t.callExpression(
-          t.memberExpression(
-            t.memberExpression(t.thisExpression(), t.identifier('__observer_removers__')),
-            t.identifier('push'),
-          ),
-          observeExprs,
+          t.memberExpression(t.thisExpression(), t.identifier('__observe')),
+          [
+            t.thisExpression(),
+            t.arrayExpression(observeHandler.pathParts.map((part) => t.stringLiteral(part))),
+            t.memberExpression(t.thisExpression(), t.identifier(observeHandler.methodName)),
+          ],
         ),
       ),
     )
@@ -707,6 +861,14 @@ export function applyStaticReactivity(
             refreshMethodName: string
             pathParts: PathParts
           }> = []
+          const observeListConfigs: Array<{
+            storeVar: string
+            pathParts: PathParts
+            arrayPropName: string
+            componentTag: string
+            containerBindingId?: string
+            itemIdProperty?: string
+          }> = []
           const mapItemAttrInfos: Array<{
             itemVariable: string
             itemIdProperty?: string
@@ -745,7 +907,7 @@ export function applyStaticReactivity(
               }
 
               const propNames = getTemplatePropNames(classPath.node.body)
-              const methods = generateComponentArrayMethods(
+              const arrayResult = generateComponentArrayResult(
                 um,
                 arrayPropName,
                 imports,
@@ -755,9 +917,9 @@ export function applyStaticReactivity(
                 getTemplateParamIdentifier(classPath.node.body),
                 tmplSetupCtx,
               )
-              if (methods.length > 0 && templateMethod) {
-                methods.forEach((method) => classPath.node.body.body.push(method))
-                const importSource = imports.get(isComponentSlot.componentTag)
+              if (arrayResult && templateMethod) {
+                classPath.node.body.body.push(arrayResult.itemPropsMethod)
+                const importSource = imports.get(arrayResult.componentTag)
                 if (importSource) {
                   const delegatedEvents = getHoistableRootEventsForImport(sourceFile, importSource).map((meta) => ({
                     eventType: meta.eventType,
@@ -770,17 +932,111 @@ export function applyStaticReactivity(
                     appendCompiledEventMethods(classPath.node.body, delegatedEvents)
                   }
                 }
-                ensureConstructorCalls(classPath.node.body, getComponentArrayBuildMethodName(arrayPropName))
+                inlineIntoConstructor(classPath.node.body, [arrayResult.constructorInit])
                 if (storeArrayAccess) {
-                  storeComponentArrayObservers.push({
+                  observeListConfigs.push({
                     storeVar: storeArrayAccess.storeVar,
-                    refreshMethodName: getComponentArrayRefreshMethodName(arrayPropName),
                     pathParts: [storeArrayAccess.propName],
+                    arrayPropName,
+                    componentTag: arrayResult.componentTag,
+                    containerBindingId: arrayResult.containerBindingId,
+                    itemIdProperty: arrayResult.itemIdProperty,
                   })
                 } else {
                   const computedDeps = (
                     um.dependencies || collectUnresolvedDependencies([um], stateRefs, classPath.node.body)
                   ).filter((dep) => dep.storeVar || dep.pathParts[0] !== 'props')
+                  // For non-store arrays, generate a refresh method that
+                  // reconciles items using __reconcileList
+                  const refreshMethodName = getComponentArrayRefreshMethodName(arrayPropName)
+                  const itemsName = getComponentArrayItemsName(arrayPropName)
+                  const itemPropsMethodNameRef = `__itemProps_${arrayPropName}`
+                  const containerSuffix = arrayResult.containerBindingId
+                  const containerExpr = containerSuffix
+                    ? t.callExpression(
+                        t.memberExpression(t.thisExpression(), t.identifier('__el')),
+                        [t.stringLiteral(containerSuffix)],
+                      )
+                    : (jsExpr`this.$(":scope")` as t.Expression)
+
+                  // Build key function expression
+                  const itemIdProp = arrayResult.itemIdProperty
+                  const keyFn = itemIdProp && itemIdProp !== ITEM_IS_KEY
+                    ? t.arrowFunctionExpression(
+                        [t.identifier('opt')],
+                        t.memberExpression(t.identifier('opt'), t.identifier(itemIdProp)),
+                      )
+                    : itemIdProp === ITEM_IS_KEY
+                      ? t.arrowFunctionExpression([t.identifier('opt')], t.identifier('opt'))
+                      : t.arrowFunctionExpression(
+                          [t.identifier('opt'), t.identifier('__k')],
+                          t.binaryExpression('+', t.stringLiteral('__idx_'), t.identifier('__k')),
+                        )
+
+                  // __refreshIssuesItems() {
+                  //   const arr = this.props.issues ?? [];
+                  //   const __new = this.__reconcileList(this._issuesItems, arr, this.__el('b1'),
+                  //     IssueCard, opt => this.__itemProps_issues(opt), opt => opt.id);
+                  //   this._issuesItems.length = 0;
+                  //   this._issuesItems.push(...__new);
+                  // }
+                  const refreshMethod = t.classMethod(
+                    'method',
+                    t.identifier(refreshMethodName),
+                    [],
+                    t.blockStatement([
+                      ...arrayResult.arrSetupStatements.map((s) => t.cloneNode(s, true) as t.Statement),
+                      t.variableDeclaration('const', [
+                        t.variableDeclarator(
+                          t.identifier('__arr'),
+                          t.logicalExpression('??', t.cloneNode(arrayResult.arrAccessExpr, true), t.arrayExpression([])),
+                        ),
+                      ]),
+                      t.variableDeclaration('const', [
+                        t.variableDeclarator(
+                          t.identifier('__new'),
+                          t.callExpression(
+                            t.memberExpression(t.thisExpression(), t.identifier('__reconcileList')),
+                            [
+                              t.memberExpression(t.thisExpression(), t.identifier(itemsName)),
+                              t.identifier('__arr'),
+                              t.cloneNode(containerExpr, true),
+                              t.identifier(arrayResult.componentTag),
+                              t.arrowFunctionExpression(
+                                [t.identifier('opt')],
+                                t.callExpression(
+                                  t.memberExpression(t.thisExpression(), t.identifier(itemPropsMethodNameRef)),
+                                  [t.identifier('opt')],
+                                ),
+                              ),
+                              t.cloneNode(keyFn, true),
+                            ],
+                          ),
+                        ),
+                      ]),
+                      t.expressionStatement(
+                        t.assignmentExpression(
+                          '=',
+                          t.memberExpression(
+                            t.memberExpression(t.thisExpression(), t.identifier(itemsName)),
+                            t.identifier('length'),
+                          ),
+                          t.numericLiteral(0),
+                        ),
+                      ),
+                      t.expressionStatement(
+                        t.callExpression(
+                          t.memberExpression(
+                            t.memberExpression(t.thisExpression(), t.identifier(itemsName)),
+                            t.identifier('push'),
+                          ),
+                          [t.spreadElement(t.identifier('__new'))],
+                        ),
+                      ),
+                    ]),
+                  )
+                  classPath.node.body.body.push(refreshMethod)
+
                   if (computedDeps.length > 0) {
                     computedDeps.forEach((dep) => {
                       mergeObserveMethod(
@@ -794,7 +1050,7 @@ export function applyStaticReactivity(
                               t.callExpression(
                                 t.memberExpression(
                                   t.thisExpression(),
-                                  t.identifier(getComponentArrayRefreshMethodName(arrayPropName)),
+                                  t.identifier(refreshMethodName),
                                 ),
                                 [],
                               ),
@@ -805,13 +1061,13 @@ export function applyStaticReactivity(
                       if (dep.storeVar) {
                         storeComponentArrayObservers.push({
                           storeVar: dep.storeVar,
-                          refreshMethodName: getComponentArrayRefreshMethodName(arrayPropName),
+                          refreshMethodName,
                           pathParts: dep.pathParts,
                         })
                       }
                     })
                   }
-                  const itemPropsMethod = methods[0]
+                  const itemPropsMethod = arrayResult.itemPropsMethod
                   if (itemPropsMethod && t.isBlockStatement(itemPropsMethod.body)) {
                     const returnStmt = itemPropsMethod.body.body.find((s) => t.isReturnStatement(s)) as
                       | t.ReturnStatement
@@ -832,28 +1088,9 @@ export function applyStaticReactivity(
                         const key = `${dep.storeVar}:${pathPartsToString(dep.pathParts)}`
                         if (computedDepKeys.has(key)) continue
                         computedDepKeys.add(key)
-                        mergeObserveMethod(
-                          dep.observeKey,
-                          t.classMethod(
-                            'method',
-                            t.identifier(getObserveMethodName(dep.pathParts, dep.storeVar)),
-                            [t.identifier('value'), t.identifier('change')],
-                            t.blockStatement([
-                              t.expressionStatement(
-                                t.callExpression(
-                                  t.memberExpression(
-                                    t.thisExpression(),
-                                    t.identifier(getComponentArrayRefreshMethodName(arrayPropName)),
-                                  ),
-                                  [],
-                                ),
-                              ),
-                            ]),
-                          ),
-                        )
                         storeComponentArrayObservers.push({
                           storeVar: dep.storeVar!,
-                          refreshMethodName: getComponentArrayRefreshMethodName(arrayPropName),
+                          refreshMethodName,
                           pathParts: dep.pathParts,
                         })
                       }
@@ -862,12 +1099,11 @@ export function applyStaticReactivity(
                   const itemTemplateProps = collectPropNamesFromItemTemplate(um.itemTemplate, propNames)
                   const allStoreManaged = computedDeps.length > 0 && computedDeps.every((dep) => dep.storeVar)
                   componentArrayRefreshDeps.push({
-                    methodName: getComponentArrayRefreshMethodName(arrayPropName),
+                    methodName: refreshMethodName,
                     propNames: allStoreManaged ? [...itemTemplateProps] : [arrayPropName, ...itemTemplateProps],
                   })
                 }
                 componentArrayDisposeTargets.push(getComponentArrayItemsName(arrayPropName))
-                componentArrayMountMethods.push(getComponentArrayMountMethodName(arrayPropName))
                 replaceMapWithComponentArrayItems(
                   templateMethod,
                   um.computationExpr,
@@ -1093,7 +1329,7 @@ export function applyStaticReactivity(
           })
 
           // Collect observe keys that will be handled by resolved array map delegates.
-          // These keys should not trigger __refreshChildProps for wrapper components
+          // These keys should not trigger child props refresh for wrapper components
           // whose children contain the map, since the map handler updates in-place.
           const resolvedArrayMapDelegateKeys = new Set<string>()
           analysis.arrayMaps.forEach((arrayMap) => {
@@ -1336,6 +1572,8 @@ export function applyStaticReactivity(
 
             const handledByComponentArray = storeComponentArrayObservers.some(
               (obs) => obs.storeVar === storeVar && pathPartsToString(obs.pathParts) === pathPartsToString(propPath),
+            ) || observeListConfigs.some(
+              (olc) => olc.storeVar === storeVar && pathPartsToString(olc.pathParts) === pathPartsToString(propPath),
             )
             if (handledByComponentArray) continue
 
@@ -1347,7 +1585,7 @@ export function applyStaticReactivity(
           }
 
           // Identify compiled children whose `children` prop contains a resolved
-          // array map. Their __refreshChildProps calls should be skipped for
+          // array map. Their child props refresh calls should be skipped for
           // observe keys handled by the resolved array map delegates, because
           // innerHTML replacement would destroy in-place map items and lose
           // JS-object props that can't survive string serialisation.
@@ -1446,14 +1684,13 @@ export function applyStaticReactivity(
               }
             })
 
-            // Also strip map calls from __buildProps and __refreshChildProps methods
+            // Also strip map calls from __buildProps methods
             // that reference these children prop template literals.
             for (const member of classPath.node.body.body) {
               if (!t.isClassMethod(member) || !t.isIdentifier(member.key)) continue
               const methodName = member.key.name
               const isRelevant = childrenWithResolvedMap.size > 0 && (
-                methodName.startsWith('__buildProps_') ||
-                methodName.startsWith('__refreshChildProps_')
+                methodName.startsWith('__buildProps_')
               )
               if (!isRelevant) continue
               // Find template literals in the method body and strip map calls
@@ -1519,7 +1756,7 @@ export function applyStaticReactivity(
               const existing = addedMethods.get(observeKey)
               const calls = children
                 .filter((child) => {
-                  // Skip refreshChildProps for children with resolved array maps
+                  // Skip child props refresh for children with resolved array maps
                   // when the observe key is handled by the map delegate.
                   if (
                     resolvedArrayMapDelegateKeys.has(observeKey) &&
@@ -1533,15 +1770,25 @@ export function applyStaticReactivity(
                   t.expressionStatement(
                     t.callExpression(
                       t.memberExpression(
-                        t.thisExpression(),
-                        t.identifier(`__refreshChildProps_${child.instanceVar.replace(/^_/, '')}`),
+                        t.memberExpression(t.thisExpression(), t.identifier(child.instanceVar)),
+                        t.identifier('__geaUpdateProps'),
                       ),
-                      [],
+                      [
+                        t.callExpression(
+                          t.memberExpression(
+                            t.thisExpression(),
+                            t.identifier(`__buildProps_${child.instanceVar.replace(/^_/, '')}`),
+                          ),
+                          [],
+                        ),
+                      ],
                     ),
                   ),
                 )
               if (existing && t.isBlockStatement(existing.body)) {
-                existing.body.body.push(...calls)
+                // Prepend child props updates so they run before any __geaPatchCond
+                // calls that may early-return and render the child with stale props.
+                existing.body.body.unshift(...calls)
               } else {
                 const method = t.classMethod(
                   'method',
@@ -1694,7 +1941,7 @@ export function applyStaticReactivity(
               computationExpr: computationExprSafe ?? computationExpr,
             }
             const propNames = getTemplatePropNames(classPath.node.body)
-            const methods = generateComponentArrayMethods(
+            const arrayResult = generateComponentArrayResult(
               um,
               arrayPropName,
               imports,
@@ -1704,11 +1951,9 @@ export function applyStaticReactivity(
               getTemplateParamIdentifier(classPath.node.body),
               tmplSetupCtx,
             )
-            if (methods.length > 0 && templateMethod) {
-              methods.forEach((method) => classPath.node.body.body.push(method))
-              const importSource = imports.get(
-                isUnresolvedMapWithComponentChild(um as any, imports)!.componentTag,
-              )
+            if (arrayResult && templateMethod) {
+              classPath.node.body.body.push(arrayResult.itemPropsMethod)
+              const importSource = imports.get(arrayResult.componentTag)
               if (importSource) {
                 const delegatedEvents = getHoistableRootEventsForImport(sourceFile, importSource).map((meta) => ({
                   eventType: meta.eventType,
@@ -1721,41 +1966,18 @@ export function applyStaticReactivity(
                   appendCompiledEventMethods(classPath.node.body, delegatedEvents)
                 }
               }
-              ensureConstructorCalls(classPath.node.body, getComponentArrayBuildMethodName(arrayPropName))
-              if (storeArrayAccess) {
-                storeComponentArrayObservers.push({
-                  storeVar: storeArrayAccess.storeVar,
-                  refreshMethodName: getComponentArrayRefreshMethodName(arrayPropName),
-                  pathParts: [storeArrayAccess.propName],
-                })
-              } else if (arrayMap.storeVar) {
-                // Multi-part store path — generate observer for each path part
-                // so that changes to any parent trigger refresh
-                const refreshMethodName = getComponentArrayRefreshMethodName(arrayPropName)
-                mergeObserveMethod(
-                  buildObserveKey(arrayMap.arrayPathParts, arrayMap.storeVar),
-                  t.classMethod(
-                    'method',
-                    t.identifier(getObserveMethodName(arrayMap.arrayPathParts, arrayMap.storeVar)),
-                    [t.identifier('value'), t.identifier('change')],
-                    t.blockStatement([
-                      t.expressionStatement(
-                        t.callExpression(
-                          t.memberExpression(t.thisExpression(), t.identifier(refreshMethodName)),
-                          [],
-                        ),
-                      ),
-                    ]),
-                  ),
-                )
-                storeComponentArrayObservers.push({
+              inlineIntoConstructor(classPath.node.body, [arrayResult.constructorInit])
+              if (arrayMap.storeVar) {
+                observeListConfigs.push({
                   storeVar: arrayMap.storeVar,
-                  refreshMethodName,
                   pathParts: arrayMap.arrayPathParts,
+                  arrayPropName,
+                  componentTag: arrayResult.componentTag,
+                  containerBindingId: arrayResult.containerBindingId,
+                  itemIdProperty: arrayResult.itemIdProperty,
                 })
               }
               componentArrayDisposeTargets.push(getComponentArrayItemsName(arrayPropName))
-              componentArrayMountMethods.push(getComponentArrayMountMethodName(arrayPropName))
               const mapReplaceExpr = storeArrayAccess
                 ? t.memberExpression(t.identifier(storeArrayAccess.storeVar), t.identifier(storeArrayAccess.propName))
                 : computationExpr
@@ -1908,60 +2130,8 @@ export function applyStaticReactivity(
             }
           }
 
-          // Component array items must be mounted after the parent element is
-          // in the DOM — they are NOT embedded as strings in the template.
-          if (componentArrayMountMethods.length > 0) {
-            const mountCalls: t.Statement[] = componentArrayMountMethods.map((methodName) =>
-              t.expressionStatement(
-                t.callExpression(t.memberExpression(t.thisExpression(), t.identifier(methodName)), []),
-              ),
-            )
-            // Check if onAfterRender already exists (from childrenWithResolvedMap block above)
-            const existingAfterRender = classPath.node.body.body.find(
-              (m): m is t.ClassMethod =>
-                t.isClassMethod(m) && t.isIdentifier(m.key) && m.key.name === 'onAfterRender',
-            )
-            if (existingAfterRender) {
-              existingAfterRender.body.body.push(...mountCalls)
-            } else {
-              const afterRenderMethod = t.classMethod(
-                'method',
-                t.identifier('onAfterRender'),
-                [],
-                t.blockStatement([
-                  t.expressionStatement(
-                    t.callExpression(
-                      t.memberExpression(t.super(), t.identifier('onAfterRender')),
-                      [],
-                    ),
-                  ),
-                  ...mountCalls,
-                ]),
-              )
-              classPath.node.body.body.push(afterRenderMethod)
-            }
-
-            // Also override __geaRequestRender so component array items are
-            // re-mounted after a full DOM re-render (e.g. triggered by a
-            // parent-level store observer).  __geaRequestRender resets
-            // rendered_/element_ on compiled children but does NOT call
-            // onAfterRender, so mount methods must be invoked explicitly.
-            const rerenderOverride = t.classMethod(
-              'method',
-              t.identifier('__geaRequestRender'),
-              [],
-              t.blockStatement([
-                t.expressionStatement(
-                  t.callExpression(
-                    t.memberExpression(t.super(), t.identifier('__geaRequestRender')),
-                    [],
-                  ),
-                ),
-                ...mountCalls.map((stmt) => t.cloneNode(stmt, true) as t.Statement),
-              ]),
-            )
-            classPath.node.body.body.push(rerenderOverride)
-          }
+          // Component array items are now mounted by the runtime's __observeList()
+          // handler — no onAfterRender/__geaRequestRender overrides needed.
 
           if (renderEventHandlers.length > 0) {
             applied = appendCompiledEventMethods(classPath.node.body, renderEventHandlers) || applied
@@ -1971,11 +2141,12 @@ export function applyStaticReactivity(
           }
 
           if (applied) {
+            type ObserverEntry = { pathParts: PathParts; methodName: string; isVia?: boolean; rereadExpr?: t.Expression }
             const importedStores = new Map<
               string,
               {
                 captureExpression: t.Expression
-                observeHandlers: Map<string, { pathParts: PathParts; methodName: string }>
+                observeHandlers: Map<string, ObserverEntry>
               }
             >()
             const localObserveHandlers = new Map<string, { pathParts: PathParts; methodName: string }>()
@@ -1985,13 +2156,11 @@ export function applyStaticReactivity(
                 const captureExpression = t.memberExpression(t.identifier(storeVar), t.identifier('__store'))
                 importedStores.set(storeVar, {
                   captureExpression,
-                  observeHandlers: new Map<string, { pathParts: PathParts; methodName: string }>(),
+                  observeHandlers: new Map<string, ObserverEntry>(),
                 })
               }
               return importedStores.get(storeVar)!
             }
-
-            const prevValueInits: t.Statement[] = []
 
             addedMethods.forEach((_method, observeKey) => {
               const { parts, storeVar } = parseObserveKey(observeKey)
@@ -2001,43 +2170,16 @@ export function applyStaticReactivity(
                   const compGetterDeps = componentGetterStoreDeps.get(parts[0])
                   if (compGetterDeps && compGetterDeps.length > 0) {
                     const originalMethodName = getObserveMethodName(parts)
-                    const wrapperMethodName = `${originalMethodName}__via`
-                    if (
-                      !classPath.node.body.body.some(
-                        (m) => t.isClassMethod(m) && t.isIdentifier(m.key) && m.key.name === wrapperMethodName,
-                      )
-                    ) {
-                      classPath.node.body.body.push(
-                        t.classMethod(
-                          'method',
-                          t.identifier(wrapperMethodName),
-                          [t.identifier('_v'), t.identifier('change')],
-                          t.blockStatement([
-                            t.expressionStatement(
-                              t.callExpression(
-                                t.memberExpression(t.thisExpression(), t.identifier(originalMethodName)),
-                                [
-                                  t.memberExpression(t.thisExpression(), t.identifier(parts[0])),
-                                  t.nullLiteral(),
-                                ],
-                              ),
-                            ),
-                          ]),
-                        ),
-                      )
-                    }
+                    // Inline via: register observer entries with re-read expression
                     for (const dep of compGetterDeps) {
                       const depKey = buildObserveKey(dep.pathParts, dep.storeVar) + `__getter_${parts[0]}`
                       ensureStoreGroup(dep.storeVar).observeHandlers.set(depKey, {
                         pathParts: dep.pathParts,
-                        methodName: wrapperMethodName,
+                        methodName: originalMethodName,
+                        isVia: true,
+                        rereadExpr: t.memberExpression(t.thisExpression(), t.identifier(parts[0])),
                       })
                     }
-                    // Initialize __geaPrev_ for component getter via pattern
-                    const compPrevProp = `__geaPrev_${originalMethodName}`
-                    prevValueInits.push(
-                      js`try { this.${id(compPrevProp)} = this.${id(parts[0])}; } catch(_e) {}`,
-                    )
                   }
                   return
                 }
@@ -2049,40 +2191,16 @@ export function applyStaticReactivity(
                 const getterDepPaths = storeRef?.getterDeps?.get(parts[0])
                 if (getterDepPaths && getterDepPaths.length > 0) {
                   const originalMethodName = getObserveMethodName(parts, storeVar)
-                  const wrapperMethodName = `${originalMethodName}__via`
-                  if (
-                    !classPath.node.body.body.some(
-                      (m) => t.isClassMethod(m) && t.isIdentifier(m.key) && m.key.name === wrapperMethodName,
-                    )
-                  ) {
-                    classPath.node.body.body.push(
-                      t.classMethod(
-                        'method',
-                        t.identifier(wrapperMethodName),
-                        [t.identifier('_v'), t.identifier('change')],
-                        t.blockStatement([
-                          t.expressionStatement(
-                            t.callExpression(t.memberExpression(t.thisExpression(), t.identifier(originalMethodName)), [
-                              t.memberExpression(t.identifier(storeVar), t.identifier(parts[0])),
-                              t.nullLiteral(),
-                            ]),
-                          ),
-                        ]),
-                      ),
-                    )
-                  }
+                  // Inline via: register observer entries with re-read expression
                   for (const depPath of getterDepPaths) {
                     const depKey = buildObserveKey(depPath, storeVar) + `__getter_${parts[0]}`
                     ensureStoreGroup(storeVar).observeHandlers.set(depKey, {
                       pathParts: depPath,
-                      methodName: wrapperMethodName,
+                      methodName: originalMethodName,
+                      isVia: true,
+                      rereadExpr: t.memberExpression(t.identifier(storeVar), t.identifier(parts[0])),
                     })
                   }
-                  // Initialize __geaPrev_ so the first flush doesn't spuriously trigger __geaRequestRender
-                  const prevProp = `__geaPrev_${originalMethodName}`
-                  prevValueInits.push(
-                    js`try { this.${id(prevProp)} = ${t.memberExpression(t.identifier(storeVar), t.identifier(parts[0]))}; } catch(_e) {}`,
-                  )
                   return
                 }
               }
@@ -2163,19 +2281,24 @@ export function applyStaticReactivity(
               const storeConfigs = Array.from(importedStores.entries()).map(([storeVar, config]) => ({
                 storeVar,
                 captureExpression: config.captureExpression,
-                observeHandlers: Array.from(config.observeHandlers.values()).map(({ pathParts, methodName }) => ({
+                observeHandlers: Array.from(config.observeHandlers.values()).map(({ pathParts, methodName, isVia, rereadExpr }) => ({
                   pathParts,
                   methodName,
+                  isVia,
+                  rereadExpr,
                 })),
               }))
 
-              if (storeConfigs.length > 0 || mapRegistrations.length > 0) {
-                const createdHooksMethod = generateCreatedHooks(storeConfigs, htmlArrayMaps.length > 0)
+              // Ensure store groups exist for observeList configs so __observeList
+              // calls are generated even when there are no other observe handlers
+              for (const olc of observeListConfigs) {
+                ensureStoreGroup(olc.storeVar)
+              }
+
+              if (storeConfigs.length > 0 || mapRegistrations.length > 0 || observeListConfigs.length > 0) {
+                const createdHooksMethod = generateCreatedHooks(storeConfigs, htmlArrayMaps.length > 0, observeListConfigs)
                 if (mapRegistrations.length > 0) {
                   createdHooksMethod.body.body.push(...mapRegistrations)
-                }
-                if (prevValueInits.length > 0) {
-                  createdHooksMethod.body.body.push(...prevValueInits)
                 }
                 classPath.node.body.body.push(createdHooksMethod)
               }
@@ -2614,18 +2737,10 @@ function replaceMapWithComponentArrayItems(
         toReplace = path.parentPath.parentPath as NodePath<t.CallExpression>
       }
 
-      // Replace with `this._items.map(item => `${item}`).join('')`
-      // so the template stringifies the pre-built instances instead of creating new ones
+      // Replace with `this._items.join('')`
+      // so the template stringifies the pre-built instances
       const itemsAccess = t.memberExpression(t.thisExpression(), t.identifier(itemsName))
-      const mapCallback = t.arrowFunctionExpression(
-        [t.identifier('__item')],
-        t.templateLiteral(
-          [t.templateElement({ raw: '', cooked: '' }), t.templateElement({ raw: '', cooked: '' })],
-          [t.identifier('__item')],
-        ),
-      )
-      const mapCall = t.callExpression(t.memberExpression(itemsAccess, t.identifier('map')), [mapCallback])
-      const joinCall = t.callExpression(t.memberExpression(mapCall, t.identifier('join')), [t.stringLiteral('')])
+      const joinCall = t.callExpression(t.memberExpression(itemsAccess, t.identifier('join')), [t.stringLiteral('')])
 
       toReplace.replaceWith(joinCall)
       replaced = true
@@ -2752,32 +2867,55 @@ function ensureOnPropChangeMethod(
     }
   }
 
-  const childRefreshMethodNames = nonDirectChildren
+  const childRefreshEntries = nonDirectChildren
     .filter((child) => child.dependencies.some((dep) => !dep.storeVar && dep.pathParts[0] === 'props'))
-    .map((child) => `__refreshChildProps_${child.instanceVar.replace(/^_/, '')}`)
+    .map((child) => {
+      const depProps = new Set<string>()
+      for (const dep of child.dependencies) {
+        if (!dep.storeVar && dep.pathParts[0] === 'props' && dep.pathParts.length > 1) {
+          depProps.add(dep.pathParts[1])
+        }
+      }
+      return { child, depProps }
+    })
   const arrayRefreshMethodNames = arrayRefreshDeps.filter((d) => d.propNames.length > 0).map((d) => d.methodName)
-  const refreshMethodNames = [...new Set([...childRefreshMethodNames, ...arrayRefreshMethodNames])]
 
   const refreshPropDeps = new Map<string, Set<string>>()
-  for (const child of nonDirectChildren) {
-    const methodName = `__refreshChildProps_${child.instanceVar.replace(/^_/, '')}`
-    const depProps = new Set<string>()
-    for (const dep of child.dependencies) {
-      if (!dep.storeVar && dep.pathParts[0] === 'props' && dep.pathParts.length > 1) {
-        depProps.add(dep.pathParts[1])
-      }
-    }
-    if (depProps.size > 0) {
-      refreshPropDeps.set(methodName, depProps)
-    }
-  }
   for (const { methodName, propNames } of arrayRefreshDeps) {
     if (propNames.length > 0) {
       refreshPropDeps.set(methodName, new Set(propNames))
     }
   }
 
-  const refreshCalls: t.Statement[] = refreshMethodNames.map((name) => {
+  const childRefreshCalls: t.Statement[] = childRefreshEntries.map(({ child, depProps }) => {
+    const call = t.expressionStatement(
+      t.callExpression(
+        t.memberExpression(
+          t.memberExpression(t.thisExpression(), t.identifier(child.instanceVar)),
+          t.identifier('__geaUpdateProps'),
+        ),
+        [
+          t.callExpression(
+            t.memberExpression(
+              t.thisExpression(),
+              t.identifier(`__buildProps_${child.instanceVar.replace(/^_/, '')}`),
+            ),
+            [],
+          ),
+        ],
+      ),
+    )
+    if (depProps.size > 0) {
+      const guard = Array.from(depProps).reduce<t.Expression>((acc, prop) => {
+        const test = t.binaryExpression('===', t.identifier('key'), t.stringLiteral(prop))
+        return acc ? t.logicalExpression('||', acc, test) : test
+      }, undefined!)
+      return t.ifStatement(guard, call)
+    }
+    return call
+  })
+
+  const arrayRefreshCalls: t.Statement[] = arrayRefreshMethodNames.map((name) => {
     const deps = refreshPropDeps.get(name)
     const call = t.expressionStatement(t.callExpression(t.memberExpression(t.thisExpression(), t.identifier(name)), []))
     if (deps && deps.size > 0) {
@@ -2789,6 +2927,8 @@ function ensureOnPropChangeMethod(
     }
     return call
   })
+
+  const refreshCalls: t.Statement[] = [...childRefreshCalls, ...arrayRefreshCalls]
 
   const condPatchCalls: t.Statement[] = []
   if (conditionalSlots.length > 0) {
@@ -3564,6 +3704,30 @@ function generateStateChildSwapMethod(
     }
   }
 
+  // Update child props before swapping so the child renders with fresh data
+  const propsUpdateCalls: t.Statement[] = stateChildSlots.map((slot) => {
+    const buildPropsName = `__buildProps_${slot.childInstanceVar.replace(/^_/, '')}`
+    // Check if a __buildProps method exists for this child (it won't for no-props children)
+    const hasBuildProps = classBody.body.some(
+      (m) => t.isClassMethod(m) && t.isIdentifier(m.key) && m.key.name === buildPropsName,
+    )
+    if (!hasBuildProps) return null!
+    return t.expressionStatement(
+      t.callExpression(
+        t.memberExpression(
+          t.memberExpression(t.thisExpression(), t.identifier(slot.childInstanceVar)),
+          t.identifier('__geaUpdateProps'),
+        ),
+        [
+          t.callExpression(
+            t.memberExpression(t.thisExpression(), t.identifier(buildPropsName)),
+            [],
+          ),
+        ],
+      ),
+    )
+  }).filter(Boolean)
+
   const swapCalls = stateChildSlots.map((slot) => {
     const guardClone = t.cloneNode(slot.guardExpr, true)
     return t.expressionStatement(
@@ -3572,19 +3736,19 @@ function generateStateChildSwapMethod(
         t.logicalExpression(
           '&&',
           guardClone,
-          t.callExpression(t.memberExpression(t.thisExpression(), t.identifier(slot.ensureMethodName)), []),
+          t.memberExpression(t.thisExpression(), t.identifier(slot.childInstanceVar)),
         ),
       ]),
     )
   })
 
-  const filteredSetup = pruneUnusedSetupDestructuring(setupStatements, swapCalls)
+  const filteredSetup = pruneUnusedSetupDestructuring(setupStatements, [...propsUpdateCalls, ...swapCalls])
 
   const method = t.classMethod(
     'method',
     t.identifier('__geaSwapStateChildren'),
     [],
-    t.blockStatement([...filteredSetup, ...swapCalls]),
+    t.blockStatement([...filteredSetup, ...propsUpdateCalls, ...swapCalls]),
   )
   classBody.body.push(method)
 }

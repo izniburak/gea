@@ -74,8 +74,8 @@ test('transform recognizes aliased named component imports', () => {
     }
   `)
 
-  assert.match(output, /this\._fancyCounter = new FancyCounter\(/)
-  assert.match(output, /this\._fancyCounter2 = new FancyCounter\(/)
+  assert.match(output, /this\._fancyCounter = this\.__child\(FancyCounter/)
+  assert.match(output, /this\._fancyCounter2 = this\.__child\(FancyCounter/)
 })
 
 test('prop patch methods use getElementById for element lookup', () => {
@@ -129,7 +129,10 @@ test('generated selectors distinguish repeated sibling bindings', () => {
   const bindingIds = Array.from(output.matchAll(/getElementById\([^+]*\+\s*["']-([^"']+)["']\)/g)).map(
     (match) => match[1],
   )
-  assert.equal(new Set(selectors).size >= 2 || new Set(bindingIds).size >= 2, true)
+  const updateTextIds = Array.from(output.matchAll(/this\.__updateText\('([^']+)'/g)).map(
+    (match) => match[1],
+  )
+  assert.equal(new Set(selectors).size >= 2 || new Set(bindingIds).size >= 2 || new Set(updateTextIds).size >= 2, true)
 })
 
 test('plugin transforms jsx entry files', async () => {

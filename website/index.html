@@ -832,6 +832,86 @@
           transition: 0.3s;
         }
       }
+      /* ── Playground ── */
+      .playground-trigger {
+        display: flex;
+        justify-content: center;
+        margin-top: 1.5rem;
+      }
+
+      .playground-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.75rem 1.5rem;
+        background: rgba(0, 229, 255, 0.08);
+        border: 1px solid rgba(0, 229, 255, 0.2);
+        border-radius: 8px;
+        color: var(--cyan);
+        font-family: 'Exo 2', sans-serif;
+        font-size: 0.9rem;
+        cursor: pointer;
+        transition: all 0.3s;
+      }
+
+      .playground-btn:hover {
+        background: rgba(0, 229, 255, 0.15);
+        box-shadow: var(--glow-cyan);
+      }
+
+      .playground-btn.loading {
+        opacity: 0.6;
+        cursor: wait;
+      }
+
+      .playground-container {
+        display: none;
+        margin-top: 1rem;
+      }
+
+      .playground-container.active {
+        display: flex;
+        gap: 0;
+        border: 1px solid rgba(0, 229, 255, 0.1);
+        border-radius: 0 12px 12px 12px;
+        overflow: hidden;
+        height: 400px;
+      }
+
+      .playground-editor {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+      }
+
+      .playground-preview {
+        flex: 1;
+        min-width: 0;
+        border-left: 1px solid rgba(0, 229, 255, 0.1);
+      }
+
+      .playground-preview iframe {
+        width: 100%;
+        height: 100%;
+        border: none;
+        background: #0a0a1a;
+      }
+
+      @media (max-width: 768px) {
+        .playground-container.active {
+          flex-direction: column;
+          height: 600px;
+        }
+        .playground-editor,
+        .playground-preview {
+          flex: none;
+          height: 300px;
+        }
+        .playground-preview {
+          border-left: none;
+          border-top: 1px solid rgba(0, 229, 255, 0.1);
+        }
+      }
     </style>
   </head>
   <body>
@@ -993,6 +1073,17 @@
 
 <span class="kw">const</span> <span class="fn">app</span> <span class="op">=</span> <span class="kw">new</span> <span class="cls">Counter</span>()
 <span class="fn">app</span>.<span class="fn">render</span>(document.<span class="fn">getElementById</span>(<span class="str">'app'</span>))</pre>
+        </div>
+      </div>
+      <div class="playground-trigger">
+        <button class="playground-btn" id="playground-activate">
+          Explore interactively
+        </button>
+      </div>
+      <div class="playground-container" id="playground-container">
+        <div class="playground-editor" id="playground-editor"></div>
+        <div class="playground-preview">
+          <iframe id="playground-preview" sandbox="allow-scripts allow-same-origin"></iframe>
         </div>
       </div>
     </section>
@@ -1347,6 +1438,91 @@
         { threshold: 0.2 },
       )
       document.querySelectorAll('.benchmark-container').forEach((el) => benchObserver.observe(el))
+
+    // ── Playground ──
+    const playgroundFiles = {
+      'store.ts': `import { Store } from '@geajs/core'\n\nclass CounterStore extends Store {\n  count = 0\n\n  increment() { this.count++ }\n  decrement() { this.count-- }\n}\n\nexport default new CounterStore()`,
+      'Counter.tsx': `import { Component } from '@geajs/core'\nimport store from './store'\n\nexport default class Counter extends Component {\n  template() {\n    return (\n      <div class="counter">\n        <span>{store.count}</span>\n        <button click={store.increment}>+</button>\n        <button click={store.decrement}>-</button>\n      </div>\n    )\n  }\n}`,
+      'app.tsx': `import Counter from './Counter'\n\nconst app = new Counter()\napp.render(document.getElementById('app'))`,
+    }
+    const fileOrder = ['store.ts', 'Counter.tsx', 'app.tsx']
+    const tabToFile = { store: 'store.ts', component: 'Counter.tsx', app: 'app.tsx' }
+
+    let playgroundReady = false
+    let playgroundModules = null
+    let editorInstance = null
+    let compileTimer = null
+
+    // Preload playground assets after page load
+    window.addEventListener('load', () => {
+      Promise.all([
+        import('./playground/gea-compiler-browser.js'),
+        import('./playground/editor.js'),
+        import('./playground/preview.js'),
+      ]).then(([compiler, editor, preview]) => {
+        playgroundModules = { compiler, editor, preview }
+        playgroundReady = true
+        // Remove loading state if button was already clicked
+        const btn = document.getElementById('playground-activate')
+        if (btn.classList.contains('loading')) {
+          activatePlayground()
+        }
+      }).catch(err => {
+        console.error('Failed to preload playground:', err)
+      })
+    })
+
+    async function activatePlayground() {
+      if (!playgroundModules) return
+      const { compiler, editor, preview } = playgroundModules
+
+      const btn = document.getElementById('playground-activate')
+      const container = document.getElementById('playground-container')
+      const editorEl = document.getElementById('playground-editor')
+      const iframe = document.getElementById('playground-preview')
+
+      // Hide static code panels, show playground
+      document.querySelector('.code-panels').style.display = 'none'
+      btn.style.display = 'none'
+      container.classList.add('active')
+
+      // Create editor
+      const activeTab = document.querySelector('.code-tab.active')
+      const activeFile = tabToFile[activeTab?.dataset.tab || 'store']
+
+      editorInstance = await editor.createEditor(editorEl, playgroundFiles, activeFile, (files) => {
+        // Debounced recompile
+        clearTimeout(compileTimer)
+        compileTimer = setTimeout(() => compileAndPreview(files, compiler, preview, iframe), 300)
+      })
+
+      // Wire tab clicks to editor
+      document.querySelectorAll('.code-tab').forEach((tab) => {
+        tab.addEventListener('click', () => {
+          if (editorInstance) {
+            editorInstance.setActiveFile(tabToFile[tab.dataset.tab])
+          }
+        })
+      })
+
+      // Initial compile
+      compileAndPreview(playgroundFiles, compiler, preview, iframe)
+    }
+
+    function compileAndPreview(files, compiler, preview, iframe) {
+      const result = compiler.compileForBrowser(files)
+      preview.renderPreview(iframe, result.compiledModules, fileOrder, result.errors)
+    }
+
+    document.getElementById('playground-activate').addEventListener('click', () => {
+      const btn = document.getElementById('playground-activate')
+      if (playgroundReady) {
+        activatePlayground()
+      } else {
+        btn.classList.add('loading')
+        btn.textContent = 'Loading...'
+      }
+    })
     </script>
   </body>
 </html>

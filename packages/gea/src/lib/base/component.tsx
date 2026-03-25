@@ -169,27 +169,6 @@ export default class Component extends Store {
     return this.rendered_
   }
 
-  /**
-   * Force a full DOM replacement by re-evaluating the template.
-   * Used when the template has multiple return paths (early return pattern)
-   * and the reactive system can't patch individual elements.
-   */
-  __rerender() {
-    if (!this.rendered_ || !this.element_) return
-    const manager = ComponentManager.getInstance()
-    const newHtml = String(this.template(this.props)).trim()
-    const newEl = manager.createElement(newHtml)
-    const parent = this.element_.parentNode
-    if (parent) {
-      parent.replaceChild(newEl, this.element_)
-      this.element_ = newEl
-      ;(newEl as any).__geaComponent = this
-      this.attachBindings_()
-      this.mountCompiledChildComponents_()
-      this.instantiateChildComponents_()
-      this.setupEventDirectives_()
-    }
-  }
 
   onAfterRender() {}
 
@@ -251,7 +230,7 @@ export default class Component extends Store {
     for (const key in nextProps) {
       this.props[key] = nextProps[key]
     }
-    if (typeof (this as any).__onPropChange !== 'function' && typeof this.__geaRequestRender === 'function') {
+    if (typeof (this as any).__onPropChange !== 'function') {
       this.__geaRequestRender()
     }
   }
@@ -331,6 +310,12 @@ export default class Component extends Store {
     const manager = ComponentManager.getInstance()
     const newElement = manager.createElement(String(this.template(this.props)).trim())
 
+    if (!newElement) {
+      this.element_ = placeholder as unknown as HTMLElement
+      this.rendered_ = true
+      return
+    }
+
     parent.replaceChild(newElement, placeholder)
 
     this.element_ = newElement
@@ -345,14 +330,8 @@ export default class Component extends Store {
       ;(this as any).__setupRefs()
     }
 
-    // Re-sync list items after full re-render. When a parent object changes
-    // (e.g. issue null→object), __observeList on ["issue","comments"] doesn't
-    // fire because the proxy only emits on ["issue"]. Rebuild items from
-    // current store data and render any new ones into their containers.
     if ((this as any).__geaListConfigs) {
       for (const { store: s, path: p, config: c } of (this as any).__geaListConfigs) {
-        // Lazily resolve items from the instance property if not yet available
-        // (createdHooks runs before constructor body sets the instance variable)
         if (!c.items && c.itemsKey) c.items = (this as any)[c.itemsKey]
         if (!c.items) continue
         const arr = p.reduce((obj: any, key: string) => obj?.[key], s.__store) ?? []

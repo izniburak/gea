@@ -242,6 +242,44 @@ test('constructor-inlined conditional slot init is guarded when template has ear
   )
 })
 
+test('compound || early-return guard optionalizes constructor-inlined conditional slot init', () => {
+  const output = transformComponentSource(`
+    import { Component } from '@geajs/core'
+    import issueStore from './issue-store'
+
+    export default class IssueDetails extends Component {
+      isEditing = false
+
+      template() {
+        const { isLoading, issue } = issueStore
+
+        if (isLoading || !issue) return <div>Loading</div>
+
+        const desc = issue.description || ''
+
+        return (
+          <div>
+            {this.isEditing && <textarea value={desc} />}
+            {!this.isEditing && desc && <p>{desc}</p>}
+          </div>
+        )
+      }
+    }
+  `)
+
+  assert.match(output, /__geaRegisterCond/, 'should generate __geaRegisterCond calls')
+
+  const ctorStart = output.indexOf('constructor(')
+  const templateStart = output.indexOf('  template()')
+  assert.ok(ctorStart >= 0 && templateStart > ctorStart, 'expected constructor before template()')
+  const ctorBody = output.slice(ctorStart, templateStart)
+  assert.match(
+    ctorBody,
+    /issue\?\.description/,
+    'compound || guard must still optionalize store reads in constructor-inlined cond-slot setup',
+  )
+})
+
 test('conditional slot getTruthyHtml includes template locals used by branch (e.g. filtered)', async () => {
   const plugin = geaPlugin()
   const transform = typeof plugin.transform === 'function' ? plugin.transform : plugin.transform?.handler

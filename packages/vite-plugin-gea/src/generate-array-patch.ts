@@ -63,18 +63,50 @@ const EVENT_NAMES = new Set([
   'drop',
 ])
 
-function collectItemTemplateProps(template: t.JSXElement | t.JSXFragment, itemVar: string): string[] {
-  const props = new Set<string>()
+interface DummyPropTree {
+  [key: string]: DummyPropTree | true
+}
+
+function collectItemTemplatePropTree(template: t.JSXElement | t.JSXFragment, itemVar: string): DummyPropTree {
+  const tree: DummyPropTree = {}
   const program = t.program([t.expressionStatement(t.cloneNode(template, true))])
   traverse(program, {
     noScope: true,
     MemberExpression(path: NodePath<t.MemberExpression>) {
-      if (!t.isIdentifier(path.node.object, { name: itemVar })) return
-      if (!t.isIdentifier(path.node.property) || path.node.computed) return
-      props.add(path.node.property.name)
+      const chain: string[] = []
+      let node: t.Expression = path.node
+      while (t.isMemberExpression(node) && !node.computed && t.isIdentifier(node.property)) {
+        chain.unshift(node.property.name)
+        node = node.object
+      }
+      if (!t.isIdentifier(node, { name: itemVar }) || chain.length === 0) return
+      let cursor: DummyPropTree = tree
+      for (let i = 0; i < chain.length; i++) {
+        const key = chain[i]
+        if (i === chain.length - 1) {
+          if (!(key in cursor)) cursor[key] = true
+        } else {
+          if (!(key in cursor) || cursor[key] === true) cursor[key] = {}
+          cursor = cursor[key] as DummyPropTree
+        }
+      }
     },
   })
-  return Array.from(props)
+  return tree
+}
+
+function buildDummyFromTree(tree: DummyPropTree, keyProp: string | null): t.ObjectExpression {
+  const props: t.ObjectProperty[] = []
+  for (const [key, value] of Object.entries(tree)) {
+    if (key === keyProp) {
+      props.push(t.objectProperty(t.identifier(key), t.numericLiteral(0)))
+    } else if (value === true) {
+      props.push(t.objectProperty(t.identifier(key), t.stringLiteral('')))
+    } else {
+      props.push(t.objectProperty(t.identifier(key), buildDummyFromTree(value, null)))
+    }
+  }
+  return t.objectExpression(props)
 }
 
 export function generatePatchItemMethod(arrayMap: ArrayMapBinding): t.ClassMethod | null {
@@ -438,7 +470,7 @@ export function generateCreateItemMethod(
 
   const { hoists, patchedEntries } = hoistStoreReads(entries, arrayMap.storeVar)
 
-  const itemProps = collectItemTemplateProps(arrayMap.itemTemplate!, arrayMap.itemVariable)
+  const propTree = collectItemTemplatePropTree(arrayMap.itemTemplate!, arrayMap.itemVariable)
 
   const containerRef = t.memberExpression(t.thisExpression(), t.identifier(containerProp))
   const cVar = t.identifier('__c')
@@ -452,16 +484,8 @@ export function generateCreateItemMethod(
   const dummyItem: t.Expression = isPrimitiveKey
     ? t.stringLiteral('__dummy__')
     : (() => {
-        const dummyProps: t.ObjectProperty[] = []
-        const seen = new Set<string>()
-        for (const prop of [itemIdProperty, ...itemProps]) {
-          if (seen.has(prop)) continue
-          seen.add(prop)
-          dummyProps.push(
-            t.objectProperty(t.identifier(prop), prop === itemIdProperty ? t.numericLiteral(0) : t.stringLiteral('')),
-          )
-        }
-        return t.objectExpression(dummyProps)
+        if (itemIdProperty && !(itemIdProperty in propTree)) propTree[itemIdProperty] = true
+        return buildDummyFromTree(propTree, itemIdProperty)
       })()
 
   const tplInit: t.Statement[] = [

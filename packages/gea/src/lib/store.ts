@@ -295,6 +295,10 @@ export class Store {
 
   observe(path: string | string[], handler: StoreObserver): () => void {
     const pathParts = splitPath(path)
+    return this._addObserver(pathParts, handler)
+  }
+
+  private _addObserver(pathParts: string[], handler: StoreObserver): () => void {
     const nodes = [this._observerRoot]
     let node = this._observerRoot
 

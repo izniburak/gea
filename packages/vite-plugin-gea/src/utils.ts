@@ -530,7 +530,8 @@ export function derivedExprGuardsValueWhenNullish(expr: t.Expression): boolean {
   return testBranchesOnValueNullish(expr.test)
 }
 
-/** Binding that is falsy on the early-return branch (e.g. `!item` → `item`, `item == null` → `item`). */
+/** Binding that is falsy on the early-return branch (e.g. `!item` → `item`, `item == null` → `item`).
+ *  Handles compound `||` guards like `isLoading || !issue` by recursing into both sides. */
 export function earlyReturnFalsyBindingName(guard: t.Expression): string | null {
   if (t.isUnaryExpression(guard) && guard.operator === '!' && t.isIdentifier(guard.argument)) {
     return guard.argument.name
@@ -539,6 +540,9 @@ export function earlyReturnFalsyBindingName(guard: t.Expression): string | null 
     const nullish = (e: t.Expression) => t.isNullLiteral(e) || (t.isIdentifier(e) && e.name === 'undefined')
     if (t.isIdentifier(guard.left) && nullish(guard.right)) return guard.left.name
     if (t.isIdentifier(guard.right) && nullish(guard.left)) return guard.right.name
+  }
+  if (t.isLogicalExpression(guard) && guard.operator === '||') {
+    return earlyReturnFalsyBindingName(guard.left) || earlyReturnFalsyBindingName(guard.right)
   }
   return null
 }

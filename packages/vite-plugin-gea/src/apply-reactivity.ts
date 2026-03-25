@@ -798,7 +798,7 @@ export function applyStaticReactivity(
             mergeObserveMethod(observeKey, method)
           })
 
-          // Generate __rerender observer for templates with early return guards.
+          // Generate rerender observer for templates with early return guards.
           // When the guard condition changes (e.g., store.activeEmail transitions null<->non-null),
           // the entire DOM structure may change, requiring a full re-render.
           if (analysis.earlyReturnGuard) {
@@ -863,13 +863,12 @@ export function applyStaticReactivity(
               },
             })
             for (const entry of rerenderStoreKeys) {
-              // Use the standard observe method naming so the __via forwarder can find it
               const propPath = entry.pathParts
               const parsed = JSON.parse(entry.observeKey)
               const storeVarName = parsed.storeVar || undefined
               const methodNameStr = getObserveMethodName(propPath, storeVarName)
-              const rerenderMethod = jsMethod`${id(methodNameStr)}(__v, __c) { this.__rerender(); }`
-              // entry is { observeKey, pathParts }
+              const prevProp = `__geaPrev_guard_${methodNameStr}`
+              const rerenderMethod = jsMethod`${id(methodNameStr)}(__v, __c) { if (!__v === !this.${id(prevProp)}) return; this.${id(prevProp)} = __v; this.__geaRequestRender(); }`
               mergeObserveMethod(entry.observeKey, rerenderMethod)
               if (!stateProps.has(entry.observeKey)) {
                 stateProps.set(entry.observeKey, entry.pathParts)
@@ -2216,41 +2215,8 @@ export function applyStaticReactivity(
               mergeObserveMethod(observeKey, h)
             })
 
-            // For getter-backed array maps, add observers for each getter dependency
-            // that delegate to the main array handler with the re-evaluated getter value.
-            if (arrayMap.storeVar) {
-              const storeRef = stateRefs.get(arrayMap.storeVar)
-              const getterDepPaths = storeRef?.getterDeps?.get(arrayMap.arrayPathParts[0])
-              if (getterDepPaths && getterDepPaths.length > 0) {
-                for (const depPath of getterDepPaths) {
-                  const depObserveKey = buildObserveKey(depPath, arrayMap.storeVar)
-                  const depMethodName = getObserveMethodName(depPath, arrayMap.storeVar)
-                  // Build rereadExpr for the full array path: store.getter.sub1...
-                  let rereadExpr: t.Expression = t.memberExpression(
-                    t.identifier(arrayMap.storeVar),
-                    t.identifier(arrayMap.arrayPathParts[0]),
-                  )
-                  for (let i = 1; i < arrayMap.arrayPathParts.length; i++) {
-                    rereadExpr = t.memberExpression(rereadExpr, t.identifier(arrayMap.arrayPathParts[i]))
-                  }
-                  const delegateBody = t.blockStatement([
-                    t.expressionStatement(
-                      t.callExpression(t.memberExpression(t.thisExpression(), t.identifier(arrayHandlerMethodName)), [
-                        rereadExpr,
-                        t.nullLiteral(),
-                      ]),
-                    ),
-                  ])
-                  const delegateMethod = t.classMethod(
-                    'method',
-                    t.identifier(depMethodName),
-                    [t.identifier('__v'), t.identifier('__c')],
-                    delegateBody,
-                  )
-                  mergeObserveMethod(depObserveKey, delegateMethod)
-                }
-              }
-            }
+            // Getter-backed array maps are handled by the via-handler mechanism
+            // in the addedMethods loop below — no explicit delegate needed here.
 
             // No constructor init needed — element lookups use querySelector
           })
@@ -2382,10 +2348,12 @@ export function applyStaticReactivity(
                 const getterDepPaths = storeRef?.getterDeps?.get(parts[0])
                 if (getterDepPaths && getterDepPaths.length > 0) {
                   const originalMethodName = getObserveMethodName(parts, storeVar)
-                  // Build rereadExpr for the full path: store.getter.sub1.sub2...
+                  // Build rereadExpr for the full path: store.getter?.sub1?.sub2...
+                  // Use optional chaining after the getter so that null/undefined
+                  // getter results don't throw when sub-properties are accessed.
                   let rereadExpr: t.Expression = t.memberExpression(t.identifier(storeVar), t.identifier(parts[0]))
                   for (let i = 1; i < parts.length; i++) {
-                    rereadExpr = t.memberExpression(rereadExpr, t.identifier(parts[i]))
+                    rereadExpr = t.optionalMemberExpression(rereadExpr, t.identifier(parts[i]), false, true)
                   }
                   // Inline via: register observer entries with re-read expression
                   for (const depPath of getterDepPaths) {
@@ -2480,24 +2448,55 @@ export function applyStaticReactivity(
             if (guardStateKeys.size > 0) {
               addedMethods.forEach((method, observeKey) => {
                 const { parts, storeVar: sv } = parseObserveKey(observeKey)
-                if (!sv || parts.length < 2) return
-                // Check every prefix (e.g. ["issue"] for ["issue","type"])
-                for (let prefixLen = 1; prefixLen < parts.length; prefixLen++) {
-                  const prefixKey = buildObserveKey(parts.slice(0, prefixLen), sv)
-                  if (guardStateKeys.has(prefixKey)) {
-                    // Prepend: if (storeVar.parentProp == null) return;
-                    const guardCheck = t.ifStatement(
-                      t.binaryExpression(
-                        '==',
-                        t.memberExpression(t.identifier(sv), t.identifier(parts[prefixLen - 1])),
-                        t.nullLiteral(),
-                      ),
-                      t.returnStatement(),
-                    )
-                    if (t.isBlockStatement(method.body)) {
-                      method.body.body.unshift(guardCheck)
+                if (!sv) return
+
+                if (parts.length >= 2) {
+                  // Check every prefix (e.g. ["issue"] for ["issue","type"])
+                  for (let prefixLen = 1; prefixLen < parts.length; prefixLen++) {
+                    const prefixKey = buildObserveKey(parts.slice(0, prefixLen), sv)
+                    if (guardStateKeys.has(prefixKey)) {
+                      // Prepend: if (storeVar.parentProp == null) return;
+                      const guardCheck = t.ifStatement(
+                        t.binaryExpression(
+                          '==',
+                          t.memberExpression(t.identifier(sv), t.identifier(parts[prefixLen - 1])),
+                          t.nullLiteral(),
+                        ),
+                        t.returnStatement(),
+                      )
+                      if (t.isBlockStatement(method.body)) {
+                        method.body.body.unshift(guardCheck)
+                      }
+                      break // Only need the shallowest guard
                     }
-                    break // Only need the shallowest guard
+                  }
+                } else if (parts.length === 1) {
+                  // Also guard single-segment paths that are dependencies of a
+                  // guard-key getter.  E.g. when `activeEmail` is a guard key
+                  // and its getter depends on `activeEmailId`, the handler for
+                  // `["activeEmailId"]` may inline code that re-reads the getter
+                  // (e.g. `store.activeEmail.date`).  The guard-key observer
+                  // will trigger __geaRequestRender, so skipping here is safe.
+                  const storeRef = stateRefs.get(sv)
+                  if (storeRef?.getterDeps) {
+                    for (const [getterName, depPaths] of storeRef.getterDeps) {
+                      const isDepOfGetter = depPaths.some((dp) => dp.length === 1 && dp[0] === parts[0])
+                      if (!isDepOfGetter) continue
+                      const guardKey = buildObserveKey([getterName], sv)
+                      if (!guardStateKeys.has(guardKey)) continue
+                      const guardCheck = t.ifStatement(
+                        t.binaryExpression(
+                          '==',
+                          t.memberExpression(t.identifier(sv), t.identifier(getterName)),
+                          t.nullLiteral(),
+                        ),
+                        t.returnStatement(),
+                      )
+                      if (t.isBlockStatement(method.body)) {
+                        method.body.body.unshift(guardCheck)
+                      }
+                      break
+                    }
                   }
                 }
               })
@@ -3922,15 +3921,7 @@ function generateRerenderObserver(pathParts: PathParts, storeVar?: string, truth
   }
   method.body.body.push(
     t.ifStatement(
-      t.logicalExpression(
-        '&&',
-        t.memberExpression(t.thisExpression(), t.identifier('rendered_')),
-        t.binaryExpression(
-          '===',
-          t.unaryExpression('typeof', t.memberExpression(t.thisExpression(), t.identifier('__geaRequestRender'))),
-          t.stringLiteral('function'),
-        ),
-      ),
+      t.memberExpression(t.thisExpression(), t.identifier('rendered_')),
       t.blockStatement([
         t.expressionStatement(
           t.callExpression(t.memberExpression(t.thisExpression(), t.identifier('__geaRequestRender')), []),

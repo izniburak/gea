@@ -1,0 +1,201 @@
+name: E2E Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-tests-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: read
+    outputs:
+      skip: ${{ steps.decide.outputs.skip }}
+      projects: ${{ steps.decide.outputs.projects }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          list-files: json
+          filters: |
+            framework:
+              - 'packages/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'tsconfig*.json'
+              - 'tests/e2e/**'
+            examples:
+              - 'examples/**'
+            shared:
+              - 'examples/shared/**'
+            website:
+              - 'website/**'
+      - name: Decide which projects to test
+        id: decide
+        env:
+          EXAMPLES_FILES: ${{ steps.filter.outputs.examples_files }}
+        run: |
+          # If framework, test infra, or shared example code changed, run all
+          if [ "${{ steps.filter.outputs.framework }}" == "true" ] || \
+             [ "${{ steps.filter.outputs.shared }}" == "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "projects=all" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # If website changed, include playground
+          website_projects="[]"
+          if [ "${{ steps.filter.outputs.website }}" == "true" ]; then
+            website_projects='["playground"]'
+          fi
+
+          # If examples changed, extract unique example directory names
+          example_projects="[]"
+          if [ "${{ steps.filter.outputs.examples }}" == "true" ]; then
+            example_projects=$(echo "$EXAMPLES_FILES" \
+              | jq -r '.[]' \
+              | sed -n 's|^examples/\([^/]*\)/.*|\1|p' \
+              | grep -v '^shared$' \
+              | sort -u \
+              | jq -R -s -c 'split("\n") | map(select(. != ""))')
+          fi
+
+          # Merge website + example projects
+          projects=$(jq -n -c --argjson a "$website_projects" --argjson b "$example_projects" '$a + $b | unique')
+
+          if [ "$projects" == "[]" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "projects=[]" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "projects=$projects" >> "$GITHUB_OUTPUT"
+          fi
+
+  discover:
+    needs: [changes]
+    if: |
+      always() &&
+      !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true')
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.find.outputs.projects }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tests/e2e
+          sparse-checkout-cone-mode: false
+      - name: Find e2e test projects
+        id: find
+        run: |
+          # Get project names defined in the Playwright config (source of truth)
+          config_projects=$(grep -oP "name:\s*'[^']+'" tests/e2e/playwright.config.ts \
+            | sed "s/name: *'//;s/'$//" \
+            | jq -R -s -c 'split("\n") | map(select(. != ""))')
+
+          # Get all available spec files, then intersect with config projects
+          # This prevents orphan spec files from creating impossible matrix jobs
+          all_projects=$(find tests/e2e -maxdepth 1 -name '*.spec.ts' -printf '%f\n' \
+            | sed 's/\.spec\.ts$//' \
+            | jq -R -s -c 'split("\n") | map(select(. != ""))' \
+            | jq -c --argjson cfg "$config_projects" \
+              '[.[] | select(. as $s | $cfg | index($s))]')
+
+          requested='${{ needs.changes.outputs.projects }}'
+
+          # Push/dispatch (changes job skipped) or framework change → run all
+          if [ -z "$requested" ] || [ "$requested" == "all" ]; then
+            echo "projects=$all_projects" >> "$GITHUB_OUTPUT"
+          else
+            # Normalize underscores to hyphens, then intersect with available specs
+            projects=$(jq -n -c \
+              --argjson all "$all_projects" \
+              --argjson req "$requested" \
+              '$req | map(gsub("_"; "-")) | map(select(. as $r | $all | index($r))) | unique')
+            if [ "$projects" == "[]" ]; then
+              echo "projects=[]" >> "$GITHUB_OUTPUT"
+            else
+              echo "projects=$projects" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+          echo "Will test: $(cat "$GITHUB_OUTPUT" | grep projects)"
+
+  build:
+    needs: [discover]
+    if: needs.discover.outputs.projects != '[]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-dist
+          path: packages/*/dist
+          retention-days: 1
+
+  e2e-tests:
+    needs: [discover, build]
+    if: needs.discover.outputs.projects != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJson(needs.discover.outputs.projects) }}
+    name: E2E — ${{ matrix.project }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-dist
+          path: packages
+      - name: Get Playwright version
+        id: pw-version
+        run: echo "version=$(npx playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ steps.pw-version.outputs.version }}-chromium
+      - name: Install Playwright browsers
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+      - name: Install Playwright system deps
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+      - name: Run Playwright tests
+        run: npx playwright test --config=tests/e2e/playwright.config.ts --project=${{ matrix.project }}
+        env:
+          CI: true
+          E2E_PROJECT: ${{ matrix.project }}
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.project }}
+          path: test-results/
+          retention-days: 7

@@ -194,6 +194,35 @@ export function generateComponentArrayResult(
   )
 
   const itemPropsSetup = collectTemplateSetupStatements(finalPropsExpr, templateSetupContext)
+
+  // Inside __itemProps_* and __refresh*Items, store reads must bypass the proxy
+  // to avoid re-entrant observation cycles (e.g. reading a computed getter that
+  // depends on the array being iterated). Replace `storeVar` with `storeVar.__raw`
+  // in setup destructuring statements.
+  const storeVarNames = new Set<string>()
+  if (storeArrayAccess) storeVarNames.add(storeArrayAccess.storeVar)
+  for (const stmt of [...itemPropsSetup, ...arrSetupStatements]) {
+    if (!t.isVariableDeclaration(stmt)) continue
+    for (const decl of stmt.declarations) {
+      if (t.isIdentifier(decl.init) && imports.has(decl.init.name)) {
+        storeVarNames.add(decl.init.name)
+      }
+    }
+  }
+  const rewriteStoreDestructuring = (stmts: t.Statement[]) => {
+    if (storeVarNames.size === 0) return
+    for (const stmt of stmts) {
+      if (!t.isVariableDeclaration(stmt)) continue
+      for (const decl of stmt.declarations) {
+        if (t.isIdentifier(decl.init) && storeVarNames.has(decl.init.name)) {
+          decl.init = t.memberExpression(t.identifier(decl.init.name), t.identifier('__raw'))
+        }
+      }
+    }
+  }
+  rewriteStoreDestructuring(itemPropsSetup)
+  rewriteStoreDestructuring(arrSetupStatements)
+
   const itemPropsMethod = jsMethod`${id(itemPropsMethodName)}(opt) {}`
   if (indexVar) itemPropsMethod.params.push(t.identifier('__k'))
   itemPropsMethod.body.body.push(...itemPropsSetup, t.returnStatement(finalPropsExpr))

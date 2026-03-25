@@ -41,6 +41,15 @@ export function resolveExpr(expr: t.Expression | t.JSXEmptyExpression, stateRefs
       }
     }
   }
+  // Handle template literals: resolve the first expression that references state
+  if (t.isTemplateLiteral(expr)) {
+    for (const inner of expr.expressions) {
+      if (t.isExpression(inner)) {
+        const result = resolveExpr(inner, stateRefs)
+        if (result?.parts?.length) return result
+      }
+    }
+  }
   return null
 }
 

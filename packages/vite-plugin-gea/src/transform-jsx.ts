@@ -146,6 +146,54 @@ function camelToKebab(name: string): string {
   return name.replace(/([A-Z])/g, '-$1').toLowerCase()
 }
 
+function tryStaticClassObjectToString(expr: t.ObjectExpression): string | null {
+  const parts: string[] = []
+  for (const prop of expr.properties) {
+    if (!t.isObjectProperty(prop) || prop.computed) return null
+    const key = t.isIdentifier(prop.key) ? prop.key.name : t.isStringLiteral(prop.key) ? prop.key.value : null
+    if (!key) return null
+    if (t.isBooleanLiteral(prop.value)) {
+      if (prop.value.value) parts.push(key)
+    } else {
+      return null
+    }
+  }
+  return parts.join(' ')
+}
+
+function buildClassObjectExpression(expr: t.Expression): t.Expression {
+  // Object.entries(obj).filter(([,v]) => v).map(([k]) => k).join(' ')
+  return t.callExpression(
+    t.memberExpression(
+      t.callExpression(
+        t.memberExpression(
+          t.callExpression(
+            t.memberExpression(
+              t.callExpression(t.memberExpression(t.identifier('Object'), t.identifier('entries')), [expr]),
+              t.identifier('filter'),
+            ),
+            [
+              t.arrowFunctionExpression(
+                [t.arrayPattern([t.identifier('__k'), t.identifier('__v')])],
+                t.identifier('__v'),
+              ),
+            ],
+          ),
+          t.identifier('map'),
+        ),
+        [
+          t.arrowFunctionExpression(
+            [t.arrayPattern([t.identifier('__k')])],
+            t.identifier('__k'),
+          ),
+        ],
+      ),
+      t.identifier('join'),
+    ),
+    [t.stringLiteral(' ')],
+  )
+}
+
 function tryStaticStyleObjectToCSS(expr: t.ObjectExpression): string | null {
   const parts: string[] = []
   for (const prop of expr.properties) {
@@ -1082,6 +1130,21 @@ function processElement(node: t.JSXElement, parts: TemplatePart[], ctx: Ctx, ele
           )
           ;(err as any).__geaCompileError = true
           throw err
+        }
+        if (propAttrName === 'class' && t.isObjectExpression(rawExpr)) {
+          const staticClass = tryStaticClassObjectToString(rawExpr)
+          if (staticClass !== null) {
+            if (staticClass) {
+              html += ` class="${staticClass}"`
+            }
+            return
+          }
+          parts.push({ type: 'string', value: html })
+          const classExpr = buildClassObjectExpression(rawExpr)
+          parts.push({ type: 'string', value: ` class="` })
+          parts.push({ type: 'expression', value: classExpr })
+          html = '"'
+          return
         }
         if (propAttrName === 'style' && t.isObjectExpression(rawExpr)) {
           const staticCSS = tryStaticStyleObjectToCSS(rawExpr)

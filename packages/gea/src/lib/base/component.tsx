@@ -612,15 +612,15 @@ export default class Component extends Store {
       if (item.__geaItemKey != null) oldByKey.set(item.__geaItemKey, item)
     }
 
-    const next = newData.map(data => {
-      const key = String(keyExtractor(data))
+    const next = newData.map((data, idx) => {
+      const key = String(keyExtractor(data, idx))
       const existing = oldByKey.get(key)
       if (existing) {
-        existing.__geaUpdateProps(propsFactory(data))
+        existing.__geaUpdateProps(propsFactory(data, idx))
         oldByKey.delete(key)
         return existing
       }
-      return this.__child(Ctor, propsFactory(data), key)
+      return this.__child(Ctor, propsFactory(data, idx), key)
     })
 
     for (const removed of oldByKey.values()) {
@@ -658,42 +658,48 @@ export default class Component extends Store {
       // Lazily resolve items from the instance property if not yet available
       if (!config.items && config.itemsKey) config.items = (this as any)[config.itemsKey]
       if (!config.items) return
-      const storeData = store.__store
-      const arr = path.reduce((obj: any, key: string) => obj?.[key], storeData) ?? []
+      if (config.__refreshing) return
+      config.__refreshing = true
+      try {
+        const storeData = store.__store
+        const arr = path.reduce((obj: any, key: string) => obj?.[key], storeData) ?? []
 
-      if (changes.every((c: any) => c.isArrayItemPropUpdate)) {
-        // Item property update (e.g. todo.done toggled)
-        for (const c of changes) {
-          const item = config.items[c.arrayIndex]
-          if (item) {
-            item.__geaUpdateProps(config.props(arr[c.arrayIndex]))
+        if (changes.every((c: any) => c.isArrayItemPropUpdate)) {
+          // Item property update (e.g. todo.done toggled)
+          for (const c of changes) {
+            const item = config.items[c.arrayIndex]
+            if (item) {
+              item.__geaUpdateProps(config.props(arr[c.arrayIndex], c.arrayIndex))
+            }
           }
+        } else if (changes.length === 1 && changes[0].type === 'append') {
+          // Append (push)
+          const { start, count } = changes[0]
+          const container = config.container()
+          for (let i = 0; i < count; i++) {
+            const data = arr[start + i]
+            const item = this.__child(config.Ctor, config.props(data, start + i), config.key(data, start + i))
+            config.items.push(item)
+            if (this.rendered_ && container) item.render(container)
+          }
+        } else {
+          // Full replace (filter, sort, reassign)
+          const newItems = this.__reconcileList(
+            config.items,
+            arr,
+            config.container(),
+            config.Ctor,
+            config.props,
+            config.key,
+          )
+          config.items.length = 0
+          config.items.push(...newItems)
         }
-      } else if (changes.length === 1 && changes[0].type === 'append') {
-        // Append (push)
-        const { start, count } = changes[0]
-        const container = config.container()
-        for (let i = 0; i < count; i++) {
-          const data = arr[start + i]
-          const item = this.__child(config.Ctor, config.props(data), config.key(data))
-          config.items.push(item)
-          if (this.rendered_ && container) item.render(container)
-        }
-      } else {
-        // Full replace (filter, sort, reassign)
-        const newItems = this.__reconcileList(
-          config.items,
-          arr,
-          config.container(),
-          config.Ctor,
-          config.props,
-          config.key,
-        )
-        config.items.length = 0
-        config.items.push(...newItems)
-      }
 
-      config.onchange?.()
+        config.onchange?.()
+      } finally {
+        config.__refreshing = false
+      }
     })
   }
 
@@ -710,12 +716,18 @@ export default class Component extends Store {
       if (p.join('.') !== pathKey) continue
       if (!c.items && c.itemsKey) c.items = (this as any)[c.itemsKey]
       if (!c.items) continue
-      // Read through the proxy (not __store) so getters are evaluated
-      const arr = p.reduce((obj: any, key: string) => obj?.[key], s) ?? []
-      const newItems = this.__reconcileList(c.items, arr, c.container(), c.Ctor, c.props, c.key)
-      c.items.length = 0
-      c.items.push(...newItems)
-      c.onchange?.()
+      if (c.__refreshing) return
+      c.__refreshing = true
+      try {
+        // Read through the proxy (not __store) so getters are evaluated
+        const arr = p.reduce((obj: any, key: string) => obj?.[key], s) ?? []
+        const newItems = this.__reconcileList(c.items, arr, c.container(), c.Ctor, c.props, c.key)
+        c.items.length = 0
+        c.items.push(...newItems)
+        c.onchange?.()
+      } finally {
+        c.__refreshing = false
+      }
     }
   }
 

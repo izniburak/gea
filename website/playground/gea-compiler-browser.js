@@ -45426,6 +45426,14 @@ function resolveExpr(expr, stateRefs) {
       }
     }
   }
+  if (libExports.isTemplateLiteral(expr)) {
+    for (const inner of expr.expressions) {
+      if (libExports.isExpression(inner)) {
+        const result = resolveExpr(inner, stateRefs);
+        if (result?.parts?.length) return result;
+      }
+    }
+  }
   return null;
 }
 function applyImportedState(binding, result, stateProps) {
@@ -47311,8 +47319,12 @@ function collectAllStateAccesses(templateMethod, stateRefs, stateProps) {
     Identifier(path) {
       if (!stateRefs.has(path.node.name)) return;
       const ref = stateRefs.get(path.node.name);
-      if (path.parentPath && libExports.isMemberExpression(path.parentPath.node) && path.parentPath.node.object === path.node)
-        return;
+      if (path.parentPath && libExports.isMemberExpression(path.parentPath.node) && path.parentPath.node.object === path.node && libExports.isIdentifier(path.parentPath.node.property) && !path.parentPath.node.computed) {
+        const grandParent = path.parentPath.parentPath;
+        if (!(grandParent && libExports.isCallExpression(grandParent.node) && grandParent.node.callee === path.parentPath.node)) {
+          return;
+        }
+      }
       if (ref.kind === "local-destructured" && ref.propName) {
         const observeKey = buildObserveKey([ref.propName]);
         if (!stateProps.has(observeKey)) stateProps.set(observeKey, [ref.propName]);
@@ -47321,11 +47333,8 @@ function collectAllStateAccesses(templateMethod, stateRefs, stateProps) {
       if (ref.kind === "imported-destructured" && ref.propName && ref.storeVar) {
         const storeRef = stateRefs.get(ref.storeVar);
         if (storeRef?.getterDeps?.has(ref.propName)) {
-          const depPaths = storeRef.getterDeps.get(ref.propName);
-          for (const depPath of depPaths) {
-            const observeKey = buildObserveKey(depPath, ref.storeVar);
-            if (!stateProps.has(observeKey)) stateProps.set(observeKey, [...depPath]);
-          }
+          const observeKey = buildObserveKey([ref.propName], ref.storeVar);
+          if (!stateProps.has(observeKey)) stateProps.set(observeKey, [ref.propName]);
         } else if (storeRef?.reactiveFields?.has(ref.propName)) {
           const observeKey = buildObserveKey([ref.propName], ref.storeVar);
           if (!stateProps.has(observeKey)) stateProps.set(observeKey, [ref.propName]);
@@ -52523,7 +52532,7 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
           });
           const resolvedArrayMapDelegateKeys = /* @__PURE__ */ new Set();
           analysis.arrayMaps.forEach((arrayMap) => {
-            if (arrayMap.storeVar && arrayMap.arrayPathParts.length === 1) {
+            if (arrayMap.storeVar) {
               const storeRef = stateRefs.get(arrayMap.storeVar);
               const getterDepPaths = storeRef?.getterDeps?.get(arrayMap.arrayPathParts[0]);
               if (getterDepPaths && getterDepPaths.length > 0) {
@@ -53028,7 +53037,7 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
             }
           }
           for (const arrayMap of componentArrayMaps) {
-            if (!arrayMap.storeVar || arrayMap.arrayPathParts.length !== 1) continue;
+            if (!arrayMap.storeVar) continue;
             const storeRef = stateRefs.get(arrayMap.storeVar);
             const getterDepPaths = storeRef?.getterDeps?.get(arrayMap.arrayPathParts[0]);
             if (!getterDepPaths || getterDepPaths.length === 0) continue;
@@ -53087,24 +53096,28 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                 mergeObserveMethod(observeKey, h);
               }
             );
-            if (arrayMap.storeVar && arrayMap.arrayPathParts.length === 1) {
+            if (arrayMap.storeVar) {
               const storeRef = stateRefs.get(arrayMap.storeVar);
               const getterDepPaths = storeRef?.getterDeps?.get(arrayMap.arrayPathParts[0]);
               if (getterDepPaths && getterDepPaths.length > 0) {
                 for (const depPath of getterDepPaths) {
                   const depObserveKey = buildObserveKey(depPath, arrayMap.storeVar);
                   const depMethodName = getObserveMethodName(depPath, arrayMap.storeVar);
+                  let rereadExpr = libExports.memberExpression(
+                    libExports.identifier(arrayMap.storeVar),
+                    libExports.identifier(arrayMap.arrayPathParts[0])
+                  );
+                  for (let i = 1; i < arrayMap.arrayPathParts.length; i++) {
+                    rereadExpr = libExports.memberExpression(
+                      rereadExpr,
+                      libExports.identifier(arrayMap.arrayPathParts[i])
+                    );
+                  }
                   const delegateBody = libExports.blockStatement([
                     libExports.expressionStatement(
                       libExports.callExpression(
                         libExports.memberExpression(libExports.thisExpression(), libExports.identifier(arrayHandlerMethodName)),
-                        [
-                          libExports.memberExpression(
-                            libExports.identifier(arrayMap.storeVar),
-                            libExports.identifier(arrayMap.arrayPathParts[0])
-                          ),
-                          libExports.nullLiteral()
-                        ]
+                        [rereadExpr, libExports.nullLiteral()]
                       )
                     )
                   ]);
@@ -53219,18 +53232,25 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                 localObserveHandlers.set(observeKey, { pathParts: parts, methodName: getObserveMethodName(parts) });
                 return;
               }
-              if (parts.length === 1) {
+              {
                 const storeRef = stateRefs.get(storeVar);
                 const getterDepPaths = storeRef?.getterDeps?.get(parts[0]);
                 if (getterDepPaths && getterDepPaths.length > 0) {
                   const originalMethodName = getObserveMethodName(parts, storeVar);
+                  let rereadExpr = libExports.memberExpression(
+                    libExports.identifier(storeVar),
+                    libExports.identifier(parts[0])
+                  );
+                  for (let i = 1; i < parts.length; i++) {
+                    rereadExpr = libExports.memberExpression(rereadExpr, libExports.identifier(parts[i]));
+                  }
                   for (const depPath of getterDepPaths) {
-                    const depKey = buildObserveKey(depPath, storeVar) + `__getter_${parts[0]}`;
+                    const depKey = buildObserveKey(depPath, storeVar) + `__getter_${parts.join("_")}`;
                     ensureStoreGroup(storeVar).observeHandlers.set(depKey, {
                       pathParts: depPath,
                       methodName: originalMethodName,
                       isVia: true,
-                      rereadExpr: libExports.memberExpression(libExports.identifier(storeVar), libExports.identifier(parts[0]))
+                      rereadExpr
                     });
                   }
                   return;
@@ -53529,13 +53549,13 @@ function generateMapRegistration(arrayMap, unresolvedMap, templatePropNames, who
     )
   ]) : jsExpr`this.$(":scope")`;
   let arrExpr = libExports.cloneNode(unresolvedMap.computationExpr || libExports.arrayExpression([]), true);
-  let setupStatements = [];
+  let setupStatements = unresolvedMap.computationSetupStatements?.length ? unresolvedMap.computationSetupStatements.map((s) => libExports.cloneNode(s, true)) : [];
   const needsReplace = templatePropNames && templatePropNames.size > 0 || wholeParamName;
   if (needsReplace) {
     arrExpr = replacePropRefsInExpression(arrExpr, templatePropNames || /* @__PURE__ */ new Set(), wholeParamName);
-    if (unresolvedMap.computationSetupStatements?.length) {
+    if (setupStatements.length) {
       setupStatements = replacePropRefsInStatements(
-        unresolvedMap.computationSetupStatements.map((s) => libExports.cloneNode(s, true)),
+        setupStatements,
         templatePropNames || /* @__PURE__ */ new Set(),
         wholeParamName
       );

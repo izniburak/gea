@@ -554,8 +554,28 @@ function collectTextChildren(
         t.isIdentifier(expr.callee.property) &&
         expr.callee.property.name === 'map'
       if (!isMap) {
-        textChildren.push({ type: 'expression', expression: expr })
-        hasExpr = true
+        // Expand TemplateLiterals into separate text + expression entries
+        // so that shouldBuildTextTemplate becomes true and the observer
+        // generates the full formatted template expression instead of
+        // using just the raw value parameter.
+        if (t.isTemplateLiteral(expr)) {
+          for (let i = 0; i < expr.quasis.length; i++) {
+            const quasi = expr.quasis[i]
+            if (quasi.value.raw) {
+              textChildren.push({ type: 'text', value: quasi.value.raw })
+            }
+            if (i < expr.expressions.length) {
+              const innerExpr = expr.expressions[i]
+              if (t.isExpression(innerExpr)) {
+                textChildren.push({ type: 'expression', expression: innerExpr })
+                hasExpr = true
+              }
+            }
+          }
+        } else {
+          textChildren.push({ type: 'expression', expression: expr })
+          hasExpr = true
+        }
       }
     }
   })
@@ -1424,8 +1444,23 @@ function collectAllStateAccesses(
     Identifier(path: NodePath<t.Identifier>) {
       if (!stateRefs.has(path.node.name)) return
       const ref = stateRefs.get(path.node.name)!
-      if (path.parentPath && t.isMemberExpression(path.parentPath.node) && path.parentPath.node.object === path.node)
-        return
+      // Skip identifiers that are objects of property access — the MemberExpression
+      // handler will register the deeper path (e.g. currentCategory.name → ["currentCategory", "name"]).
+      // But do NOT skip when the member expression is a method call callee (e.g. totalPrice.toLocaleString())
+      // or a computed access (e.g. selections[activeCategory]), since the MemberExpression handler
+      // won't handle those cases.
+      if (
+        path.parentPath &&
+        t.isMemberExpression(path.parentPath.node) &&
+        path.parentPath.node.object === path.node &&
+        t.isIdentifier(path.parentPath.node.property) &&
+        !path.parentPath.node.computed
+      ) {
+        const grandParent = path.parentPath.parentPath
+        if (!(grandParent && t.isCallExpression(grandParent.node) && grandParent.node.callee === path.parentPath.node)) {
+          return
+        }
+      }
       if (ref.kind === 'local-destructured' && ref.propName) {
         const observeKey = buildObserveKey([ref.propName])
         if (!stateProps.has(observeKey)) stateProps.set(observeKey, [ref.propName])
@@ -1434,11 +1469,10 @@ function collectAllStateAccesses(
       if (ref.kind === 'imported-destructured' && ref.propName && ref.storeVar) {
         const storeRef = stateRefs.get(ref.storeVar)
         if (storeRef?.getterDeps?.has(ref.propName)) {
-          const depPaths = storeRef.getterDeps.get(ref.propName)!
-          for (const depPath of depPaths) {
-            const observeKey = buildObserveKey(depPath, ref.storeVar)
-            if (!stateProps.has(observeKey)) stateProps.set(observeKey, [...depPath])
-          }
+          // Register the getter path itself — delegate resolution in apply-reactivity
+          // will map it to observers on the underlying dependency paths.
+          const observeKey = buildObserveKey([ref.propName], ref.storeVar)
+          if (!stateProps.has(observeKey)) stateProps.set(observeKey, [ref.propName])
         } else if (storeRef?.reactiveFields?.has(ref.propName!)) {
           const observeKey = buildObserveKey([ref.propName], ref.storeVar)
           if (!stateProps.has(observeKey)) stateProps.set(observeKey, [ref.propName])

@@ -146,6 +146,7 @@ export class Store {
       get(t, prop, receiver) {
         if (typeof prop === 'symbol') return Reflect.get(t, prop, receiver)
         if (prop === '__isProxy') return true
+        if (prop === '__raw') return t
         if (isInternalProp(prop)) return Reflect.get(t, prop, receiver)
         if (!Object.prototype.hasOwnProperty.call(t, prop)) {
           return Reflect.get(t, prop, receiver)

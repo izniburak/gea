@@ -84,6 +84,23 @@ function rewriteStateRefs(expr: t.Expression, stateRefs: Map<string, StateRefMet
       const ref = stateRefs.get(path.node.name)!
       if (ref.kind === 'local') {
         path.replaceWith(t.thisExpression())
+      } else if (ref.kind === 'imported-destructured' && ref.storeVar && ref.propName) {
+        // Destructured store vars like `const { totalPrice } = store`
+        // must be rewritten to `store.__store.totalPrice` in observer methods.
+        path.replaceWith(
+          t.memberExpression(
+            t.memberExpression(t.identifier(ref.storeVar), t.identifier('__store')),
+            t.identifier(ref.propName),
+          ),
+        )
+        path.skip()
+      } else if (ref.kind === 'local-destructured' && ref.propName) {
+        // Destructured local vars like `const { x } = this`
+        // must be rewritten to `this.x` in observer methods.
+        path.replaceWith(
+          t.memberExpression(t.thisExpression(), t.identifier(ref.propName)),
+        )
+        path.skip()
       } else {
         path.replaceWith(
           t.memberExpression(

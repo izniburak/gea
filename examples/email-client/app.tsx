@@ -82,10 +82,16 @@ export default class App extends Component {
           <div class="label-section">
             <p class="label-section-title">Labels</p>
             {labels.map((l) => (
-              <div key={l.id} class="label-item">
+              <button
+                key={l.id}
+                type="button"
+                class={`label-item ${store.activeLabelFilter === l.id ? 'active' : ''}`}
+                click={() => store.toggleLabelFilter(l.id)}
+                data-label={l.id}
+              >
                 <span class="label-dot" style={`background: ${LABEL_COLORS[l.id]}`} />
                 <span class="label-name">{l.label}</span>
-              </div>
+              </button>
             ))}
           </div>
         </aside>
@@ -93,14 +99,32 @@ export default class App extends Component {
         {/* Email List */}
         <div class="email-list-panel">
           <div class="email-list-header">
-            <h2 class="email-list-title">{store.activeFolder.charAt(0).toUpperCase() + store.activeFolder.slice(1)}</h2>
+            <h2 class="email-list-title">
+              {store.activeFolder.charAt(0).toUpperCase() + store.activeFolder.slice(1)}
+              {store.activeLabelFilter && (
+                <>
+                  {' · '}
+                  <span class="email-list-label-filter">
+                    {labels.find((x) => x.id === store.activeLabelFilter)?.label}
+                  </span>
+                </>
+              )}
+            </h2>
             <Input placeholder="Search…" value={store.searchQuery} onInput={store.setSearch} class="email-search" />
           </div>
           <Separator />
           <div class="email-list">
             {store.folderEmails.length === 0 ? (
               <div class="list-empty">
-                <p>No emails{store.searchQuery ? ' matching your search' : ''}.</p>
+                <p>
+                  {store.searchQuery && store.activeLabelFilter
+                    ? 'No emails match your search and label filter.'
+                    : store.searchQuery
+                      ? 'No emails matching your search.'
+                      : store.activeLabelFilter
+                        ? 'No emails with this label in this folder.'
+                        : 'No emails.'}
+                </p>
               </div>
             ) : (
               store.folderEmails.map((email) => <EmailRow key={email.id} email={email} />)

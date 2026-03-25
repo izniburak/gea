@@ -133,6 +133,8 @@ const INITIAL_EMAILS: Email[] = [
 export class EmailStore extends Store {
   emails: Email[] = INITIAL_EMAILS
   activeFolder: Folder = 'inbox'
+  /** When set, list only emails in the active folder that include this label. */
+  activeLabelFilter: Label | null = null
   activeEmailId: string | null = null
   composeOpen = false
   searchQuery = ''
@@ -144,8 +146,10 @@ export class EmailStore extends Store {
 
   get folderEmails(): Email[] {
     const q = this.searchQuery.toLowerCase()
+    const label = this.activeLabelFilter
     return this.emails
       .filter((e) => e.folder === this.activeFolder)
+      .filter((e) => (label ? e.labels.includes(label) : true))
       .filter((e) => {
         if (!q) return true
         return (
@@ -173,8 +177,14 @@ export class EmailStore extends Store {
 
   selectFolder(folder: Folder): void {
     this.activeFolder = folder
+    this.activeLabelFilter = null
     this.activeEmailId = null
     this.searchQuery = ''
+  }
+
+  toggleLabelFilter(label: Label): void {
+    this.activeLabelFilter = this.activeLabelFilter === label ? null : label
+    this.activeEmailId = null
   }
 
   selectEmail(id: string): void {

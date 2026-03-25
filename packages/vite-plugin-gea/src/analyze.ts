@@ -722,9 +722,11 @@ function analyzeChildren(
         // their container element paths don't collide with main-template paths.
         const nestedMapCalls = collectNestedMapCalls(expr)
         const hasNestedMapCall = nestedMapCalls.length > 0
-        const mixedTextNodeIndex = parentHasElementChildren(node)
-          ? getDOMTextNodeIndex(node.children, index)
-          : undefined
+        const jsxInTextSiblingGroup = shouldBuildTextTemplate && textSiblingGroupContainsJSX(textExpressions)
+        const mixedTextNodeIndex =
+          parentHasElementChildren(node) || jsxInTextSiblingGroup
+            ? getDOMTextNodeIndex(node.children, index)
+            : undefined
         // Call handleTextBinding first — it may push a conditional slot
         const slotCountBefore = conditionalSlots?.length ?? 0
         handleTextBinding(
@@ -749,6 +751,7 @@ function analyzeChildren(
           classBody,
           conditionalSlotNodeMap,
           mixedTextNodeIndex,
+          jsxInTextSiblingGroup,
         )
         // Determine if a conditional slot was created for this expression
         const slotCountAfter = conditionalSlots?.length ?? 0
@@ -1108,10 +1111,17 @@ function handleTextBinding(
   classBody?: t.ClassBody,
   conditionalSlotNodeMap?: Map<t.Node, string>,
   textNodeIndex?: number,
+  jsxInTextSiblingGroup = false,
 ) {
   const propName = resolvePropRef(expr, propsParamName, destructuredPropNames)
   if (propName) {
-    if (shouldBuildTextTemplate && textTemplate && textExpressions.length > 0 && templateSetupContext) {
+    if (
+      shouldBuildTextTemplate &&
+      textTemplate &&
+      textExpressions.length > 0 &&
+      templateSetupContext &&
+      !jsxInTextSiblingGroup
+    ) {
       const derivedTemplateExpr = buildTextTemplateExpressionFromParts(textTemplate, textExpressions)
       const setupStatements = collectTemplateSetupStatements(derivedTemplateExpr, templateSetupContext)
       const dependentProps = collectDependentPropNames(
@@ -1150,7 +1160,13 @@ function handleTextBinding(
     return
   }
   if (!expressionMayProduceJSX(expr)) {
-    if (shouldBuildTextTemplate && textTemplate && textExpressions.length > 0 && templateSetupContext) {
+    if (
+      shouldBuildTextTemplate &&
+      textTemplate &&
+      textExpressions.length > 0 &&
+      templateSetupContext &&
+      !jsxInTextSiblingGroup
+    ) {
       const derivedTemplateExpr = buildTextTemplateExpressionFromParts(textTemplate, textExpressions)
       const setupStatements = collectTemplateSetupStatements(derivedTemplateExpr, templateSetupContext)
       const dependentProps = collectDependentPropNames(
@@ -1250,7 +1266,7 @@ function handleTextBinding(
   if (!result?.parts?.length) {
     if (templateSetupContext && !t.isJSXEmptyExpression(expr) && !expressionMayProduceJSX(expr)) {
       const exprToUse =
-        shouldBuildTextTemplate && textTemplate
+        shouldBuildTextTemplate && textTemplate && !jsxInTextSiblingGroup
           ? buildTextTemplateExpressionFromParts(textTemplate, textExpressions)
           : expr
       const setupStatements = collectTemplateSetupStatements(exprToUse, templateSetupContext)
@@ -1274,7 +1290,7 @@ function handleTextBinding(
   }
   const selector = generateSelector(elementPath)
 
-  if (shouldBuildTextTemplate && textTemplate && textExpressions.length > 0) {
+  if (shouldBuildTextTemplate && textTemplate && textExpressions.length > 0 && !jsxInTextSiblingGroup) {
     if (isComputedArrayProp(result.parts, textExpressions, stateRefs)) {
       addArrayTextBindings(
         selector,
@@ -1299,7 +1315,7 @@ function handleTextBinding(
     ...(textNodeIndex !== undefined ? { textNodeIndex } : {}),
   }
   applyImportedState(binding, result, stateProps)
-  if (shouldBuildTextTemplate && textTemplate) {
+  if (shouldBuildTextTemplate && textTemplate && !jsxInTextSiblingGroup) {
     binding.textTemplate = textTemplate
     binding.textExpressionIndex = textExpressions.findIndex(
       (te) => pathPartsToString(te.pathParts) === pathPartsToString(result.parts),
@@ -1307,6 +1323,10 @@ function handleTextBinding(
     binding.textExpressions = textExpressions
   }
   bindings.push(binding)
+}
+
+function textSiblingGroupContainsJSX(textExpressions: TextExpression[]): boolean {
+  return textExpressions.some((te) => te.expression && expressionMayProduceJSX(te.expression))
 }
 
 function expressionMayProduceJSX(expr: t.Expression | t.JSXEmptyExpression): boolean {

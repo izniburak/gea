@@ -6,18 +6,24 @@ export interface ShellParts {
 
 export function parseShell(indexHtml: string, appElementId: string): ShellParts {
   const pattern = new RegExp(
-    `(<div[^>]*\\bid=["']${escapeRegex(appElementId)}["'][^>]*>)([\\s\\S]*?)(</div>)`,
+    `(<[a-zA-Z][a-zA-Z0-9]*[^>]*\\bid=["']${escapeRegex(appElementId)}["'][^>]*>)([\\s\\S]*?)(</[a-zA-Z][a-zA-Z0-9]*>)`,
   )
 
   const match = indexHtml.match(pattern)
   if (!match) {
     throw new Error(
       `Could not find element with id="${appElementId}" in index.html. ` +
-      `Make sure your index.html contains <div id="${appElementId}"></div>`,
+      `Make sure your index.html contains an element with id="${appElementId}" (e.g. <div id="${appElementId}"></div>).`,
     )
   }
 
-  const splitIndex = match.index! + match[1].length
+  if (match.index === undefined) {
+    throw new Error(
+      `Could not find element with id="${appElementId}" in index.html. ` +
+      `Make sure your index.html contains an element with id="${appElementId}" (e.g. <div id="${appElementId}"></div>).`,
+    )
+  }
+  const splitIndex = match.index + match[1].length
   const before = indexHtml.slice(0, splitIndex)
   const after = indexHtml.slice(splitIndex + match[2].length)
 

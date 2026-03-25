@@ -9,7 +9,7 @@ function extractStoreData(store: GeaStore): Record<string, unknown> {
   const data: Record<string, unknown> = {}
   for (const key of Object.keys(store)) {
     if (isInternalProp(key)) continue
-    if (key === 'constructor') continue
+    if (key === 'constructor' || key === '__proto__') continue
     const value: unknown = store[key]
     if (typeof value === 'function') continue
     data[key] = value

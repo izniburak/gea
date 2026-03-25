@@ -1,8 +1,28 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { setUidProvider } from '@geajs/core'
 import { isInternalProp } from './types'
 
 // Maps raw store target → cloned data overlay for the current request
 const ssrContext = new AsyncLocalStorage<WeakMap<object, Record<string, unknown>>>()
+
+// Per-request UID counter for deterministic, isolated ID generation
+const ssrUidContext = new AsyncLocalStorage<{ counter: number }>()
+
+// Register SSR-scoped UID provider. When inside an SSR context (runInSSRContext),
+// UID generation uses a per-request counter. Outside SSR, returns null to fall
+// back to the global counter. This keeps @geajs/core free of node:async_hooks.
+setUidProvider(
+  () => {
+    const ctx = ssrUidContext.getStore()
+    return ctx ? (ctx.counter++).toString(36) : null
+  },
+  (seed) => {
+    const ctx = ssrUidContext.getStore()
+    if (!ctx) return false
+    ctx.counter = seed
+    return true
+  },
+)
 
 /**
  * Called by Store Proxy get/set/delete handlers.
@@ -112,5 +132,7 @@ export function runInSSRContext<T>(
     const raw = unwrapProxy(store)
     overlays.set(raw, cloneStoreData(raw))
   }
-  return ssrContext.run(overlays, fn)
+  return ssrContext.run(overlays, () =>
+    ssrUidContext.run({ counter: 0 }, fn),
+  )
 }

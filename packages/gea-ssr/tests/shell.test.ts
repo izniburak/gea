@@ -29,6 +29,20 @@ describe('parseShell', () => {
     assert.throws(() => parseShell(html, 'app'), /Could not find.*id="app"/)
   })
 
+  it('handles main element as app root', () => {
+    const html = '<html><body><main id="app"></main></body></html>'
+    const { before, after } = parseShell(html, 'app')
+    assert.equal(before, '<html><body><main id="app">')
+    assert.equal(after, '</main></body></html>')
+  })
+
+  it('handles section element as app root', () => {
+    const html = '<html><body><section id="root" class="app"></section></body></html>'
+    const { before, after } = parseShell(html, 'root')
+    assert.equal(before, '<html><body><section id="root" class="app">')
+    assert.equal(after, '</section></body></html>')
+  })
+
   it('handles whitespace and attributes on app div', () => {
     const html = '<html><body><div id="app" class="main" ></div></body></html>'
     const { before, after } = parseShell(html, 'app')

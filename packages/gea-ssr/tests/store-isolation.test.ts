@@ -84,6 +84,28 @@ describe('store isolation', () => {
     assert.equal((store.created as Date).getTime(), date.getTime())
   })
 
+  it('logs warning for unserializable properties instead of silently dropping', () => {
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => { warnings.push(String(args[0])) }
+    try {
+      const store: GeaStore = {
+        name: 'test',
+        socket: new (class WebSocket { url = 'ws://x' })(),
+      }
+      const snapshot = snapshotStores([store])
+      // Should still snapshot the valid properties
+      assert.equal(snapshot[0][1].name, 'test')
+      // Should have logged a warning about the unserializable property
+      assert.ok(
+        warnings.some(w => w.includes('socket') && w.includes('SSR')),
+        `Expected warning about "socket", got: ${JSON.stringify(warnings)}`,
+      )
+    } finally {
+      console.warn = originalWarn
+    }
+  })
+
   it('skips internal props (underscore prefix/suffix)', () => {
     const store: GeaStore = { _private: 'a', public_: 'b', visible: 'c' }
     const snapshot = snapshotStores([store])

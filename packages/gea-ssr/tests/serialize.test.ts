@@ -73,6 +73,21 @@ describe('serializeStores', () => {
     assert.ok(parsed.TestStore.link instanceof URL, 'URL should be preserved')
   })
 
+  it('skips __proto__ key to prevent prototype pollution', () => {
+    const store: GeaStore = Object.create(null)
+    Object.defineProperty(store, '__proto__', {
+      value: 'malicious',
+      enumerable: true,
+      configurable: true,
+    })
+    store.safe = 'value'
+    const result = serializeStores([store], { S: store })
+    const parsed = evaluate(result) as Record<string, Record<string, unknown>>
+    assert.equal(parsed.S.safe, 'value')
+    assert.equal(Object.hasOwn(parsed.S, '__proto__'), false,
+      '__proto__ key should not appear as own property in serialized output')
+  })
+
   it('handles empty store registry', () => {
     const result = serializeStores([], {})
     const parsed = evaluate(result) as Record<string, unknown>

@@ -13,8 +13,9 @@ export function snapshotStores(stores: GeaStore[]): StoreSnapshot {
       if (typeof descriptor.get === 'function') continue
       try {
         data[key] = deepClone(key, descriptor.value)
-      } catch {
-        // Skip unserializable properties
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        console.warn(`[GEA SSR] snapshotStores: skipping property "${key}" — ${msg}`)
       }
     }
     return [store, data]

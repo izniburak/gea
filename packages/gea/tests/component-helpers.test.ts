@@ -444,6 +444,56 @@ describe('Component.__reconcileList', () => {
     assert.equal(result[1], items[0]) // was first, now second
     assert.equal(result[2], items[1]) // was second, now third
   })
+
+  it('preserves static DOM siblings before list roots when reconciling order (mixed container)', async () => {
+    class Parent extends Component {
+      template() {
+        return `<div id="${this.id}-board"></div>`
+      }
+    }
+    class Item extends Component {
+      template() {
+        return `<button type="button" id="${this.id}">${this.props.label}</button>`
+      }
+    }
+    const parent = new Parent()
+    document.body.innerHTML = ''
+    parent.render(document.body)
+
+    const board = parent.__el('board')
+    assert.ok(board)
+    const marker = document.createElement('span')
+    marker.className = 'static-marker'
+    marker.textContent = 'status'
+    board.appendChild(marker)
+
+    const items = [
+      parent.__child(Item, { label: 'a' }, '1'),
+      parent.__child(Item, { label: 'b' }, '2'),
+      parent.__child(Item, { label: 'c' }, '3'),
+    ]
+    items.forEach((item) => item.render(board))
+
+    assert.equal(board.firstElementChild, marker, 'initial: marker must precede list buttons')
+
+    const newData = [
+      { k: '3', label: 'c' },
+      { k: '1', label: 'a' },
+      { k: '2', label: 'b' },
+    ]
+    parent.__reconcileList(
+      items,
+      newData,
+      board,
+      Item,
+      (d) => ({ label: d.label }),
+      (d) => d.k,
+    )
+
+    assert.equal(board.firstElementChild, marker, 'after reorder: static sibling must stay first')
+    const texts = [...board.querySelectorAll('button')].map((b) => b.textContent)
+    assert.deepEqual(texts, ['c', 'a', 'b'])
+  })
 })
 
 describe('Component.__observeList', () => {

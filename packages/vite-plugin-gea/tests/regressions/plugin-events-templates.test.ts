@@ -36,9 +36,29 @@ test('prop text patch preserves surrounding template text', () => {
   `)
 
   assert.match(output, /const __boundValue = `[\s\S]*Pay \$\$\$\{value\}[\s\S]*`;/)
-  assert.match(output, /if \(!\(value === null \|\| value === undefined\)\)/)
+  // `${value}` does not read properties off value; nullish guard would skip clearing text when value becomes null.
+  assert.doesNotMatch(output, /if \(!\(value === null \|\| value === undefined\)\)/)
   assert.match(output, /textContent = __boundValue/)
   assert.doesNotMatch(output, /__geaPatchProp_totalPrice\(value\)[\s\S]*textContent = value/)
+})
+
+test('prop text patch keeps nullish guard when derived expr reads properties of value', () => {
+  const output = transformComponentSource(`
+    import { Component } from '@geajs/core'
+
+    export default class Row extends Component {
+      template({ item }) {
+        return (
+          <span class="label">
+            {item.displayName}
+          </span>
+        )
+      }
+    }
+  `)
+
+  assert.match(output, /__onPropChange/)
+  assert.match(output, /if \(!\(value === null \|\| value === undefined\)\)/)
 })
 
 test('generated selectors distinguish repeated typed inputs', () => {

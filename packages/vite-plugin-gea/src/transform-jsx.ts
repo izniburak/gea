@@ -362,6 +362,7 @@ function canBeBoolean(expr: t.Expression): boolean {
 /** True if expression is guaranteed to never produce null, undefined, or false at runtime. */
 function isAlwaysTruthy(expr: t.Expression): boolean {
   if (t.isStringLiteral(expr) || t.isNumericLiteral(expr) || t.isTemplateLiteral(expr)) return true
+  if (t.isObjectExpression(expr) || t.isArrayExpression(expr)) return true
   if (t.isConditionalExpression(expr)) return isAlwaysTruthy(expr.consequent) && isAlwaysTruthy(expr.alternate)
   return false
 }
@@ -1158,21 +1159,28 @@ function processElement(node: t.JSXElement, parts: TemplatePart[], ctx: Ctx, ele
             [t.stringLiteral('; ')],
           )
           const skipCondition = buildAttrSkipCondition(styleExpr, rawExpr)
-          parts.push({
-            type: 'expression',
-            value: t.conditionalExpression(
-              skipCondition,
-              t.stringLiteral(''),
-              t.templateLiteral(
-                [
-                  t.templateElement({ raw: ' style="', cooked: ' style="' }, false),
-                  t.templateElement({ raw: '"', cooked: '"' }, true),
-                ],
-                [styleExpr],
+          if (t.isBooleanLiteral(skipCondition) && !skipCondition.value) {
+            // Style object is always truthy — inline without guard
+            parts.push({ type: 'string', value: ` style="` })
+            parts.push({ type: 'expression', value: styleExpr })
+            html = '"'
+          } else {
+            parts.push({
+              type: 'expression',
+              value: t.conditionalExpression(
+                skipCondition,
+                t.stringLiteral(''),
+                t.templateLiteral(
+                  [
+                    t.templateElement({ raw: ' style="', cooked: ' style="' }, false),
+                    t.templateElement({ raw: '"', cooked: '"' }, true),
+                  ],
+                  [styleExpr],
+                ),
               ),
-            ),
-          })
-          html = ''
+            })
+            html = ''
+          }
           return
         }
         parts.push({ type: 'string', value: html })

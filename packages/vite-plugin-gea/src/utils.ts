@@ -358,6 +358,13 @@ function collectAllIdentifierNames(
       walk(node.object)
       return
     }
+    // Skip binding targets (LHS) of variable declarators — only walk the init (RHS).
+    // Without this, destructuring patterns like `const { x } = ...` would report `x`
+    // as "referenced", preventing pruning of other destructurings that bind `x`.
+    if (t.isVariableDeclarator(node)) {
+      walk(node.init)
+      return
+    }
     for (const key of t.VISITOR_KEYS[node.type] || []) {
       const child = (node as any)[key]
       if (Array.isArray(child)) {

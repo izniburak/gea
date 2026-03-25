@@ -483,7 +483,7 @@ test('transitive getter-to-getter deps produce __via observers for underlying st
   )
   assert.match(
     output,
-    /this\.__observe_local_issueId\(this\.issueId, null\)/,
+    /this\.__observe_local_\w+\(this\.issueId, null\)/,
     'issueId (transitive via issueMatch → routeStore.path) must have inline re-read in merged observer',
   )
   assert.doesNotMatch(

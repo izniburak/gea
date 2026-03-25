@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import test from 'node:test'
 
 import babelGenerator from '@babel/generator'
@@ -6,6 +9,7 @@ import { JSDOM } from 'jsdom'
 
 import { parseSource } from '../src/parse'
 import { transformComponentFile } from '../src/transform-component'
+import { geaPlugin } from '../src/index'
 
 const generate = 'default' in babelGenerator ? babelGenerator.default : babelGenerator
 
@@ -29,6 +33,15 @@ function transformComponentSource(source: string): string {
 
   assert.equal(transformed, true)
   return generate(parsed.ast).code
+}
+
+async function transformFunctionalComponent(source: string, name = 'TestComp'): Promise<string> {
+  const plugin = geaPlugin()
+  const transform = typeof plugin.transform === 'function' ? plugin.transform : plugin.transform?.handler
+  const id = `/virtual/${name}.jsx`
+  const result = await transform?.call({} as never, source, id)
+  assert.ok(result, 'plugin transform should return a result')
+  return typeof result === 'string' ? result : result.code
 }
 
 function installDom() {
@@ -206,6 +219,108 @@ test('store __raw forEach passes raw values without proxy overhead', async () =>
   }
 })
 
+// --- Optimization #9: Style expression should not be triplicated ---
+test('style object expression is computed once, not triplicated', () => {
+  const output = transformComponentSource(`
+    import { Component } from '@geajs/core'
+
+    export default class StyledCard extends Component {
+      template({ color }) {
+        return (
+          <div class="card">
+            <div class="swatch" style={{ backgroundColor: color }}></div>
+          </div>
+        )
+      }
+    }
+  `)
+
+  // Object.entries().map().join() is always a string — guard is unnecessary.
+  // Expect at most 2 occurrences: one in template(), one in __onPropChange().
+  // Before fix: 4 occurrences (3 in template guard + 1 in __onPropChange).
+  const styleExprCount = (output.match(/Object\.entries/g) || []).length
+  assert.ok(
+    styleExprCount <= 2,
+    `Style Object.entries expression appears ${styleExprCount} times, expected at most 2 (template + prop change). Was previously triplicated in null/false guard.`,
+  )
+})
+
+test('style object with literal values compiles to static CSS string', () => {
+  const output = transformComponentSource(`
+    import { Component } from '@geajs/core'
+
+    export default class StaticStyle extends Component {
+      template() {
+        return <div style={{ backgroundColor: 'red', fontSize: '14px' }}>Hello</div>
+      }
+    }
+  `)
+
+  // Fully static styles should inline as a CSS string, no Object.entries at runtime
+  assert.doesNotMatch(output, /Object\.entries/, 'static style should not use Object.entries at runtime')
+  assert.match(output, /style="background-color: red; font-size: 14px"/)
+})
+
+test('style expression skip guard is not generated for object expressions in template', () => {
+  const output = transformComponentSource(`
+    import { Component } from '@geajs/core'
+
+    export default class DynStyle extends Component {
+      template({ bg }) {
+        return <div style={{ backgroundColor: bg }}>X</div>
+      }
+    }
+  `)
+
+  // Extract just the template method output
+  const templateMatch = output.match(/template\([^)]*\)\s*\{([\s\S]*?)\n\s*\}/)
+  assert.ok(templateMatch, 'should have template method')
+  const templateBody = templateMatch![1]
+
+  // Object expressions are always truthy — template should not have == null || === false guard
+  assert.doesNotMatch(templateBody, /=== false/, 'template should not have === false guard for style object')
+  assert.doesNotMatch(templateBody, /== null/, 'template should not have == null guard for style object')
+})
+
+// --- Optimization #10: No dead destructured props in conditional render callbacks ---
+test('functional component with multiple conds omits unused destructured props from truthy callbacks', async () => {
+  // This mirrors the option-card pattern: two conditionals where one's condition-only
+  // variable "selected" leaks into the other's truthy callback as dead code.
+  const output = await transformFunctionalComponent(`
+    export default function OptionCard({ selected, color, label }) {
+      return (
+        <div>
+          {selected && <span class="check">✓</span>}
+          {color && (
+            <div class="swatch-wrap">
+              <div class={\`swatch \${selected ? 'swatch--selected' : ''}\`}></div>
+            </div>
+          )}
+          <p class="label">{label}</p>
+        </div>
+      )
+    }
+  `, 'OptionCard')
+
+  // Verify __geaRegisterCond is generated
+  assert.match(output, /__geaRegisterCond\(0/, 'should generate __geaRegisterCond(0,...)')
+  assert.match(output, /__geaRegisterCond\(1/, 'should generate __geaRegisterCond(1,...)')
+
+  // Cond 0's truthy callback returns static HTML (✓ span) — should NOT have
+  // destructured props since the HTML doesn't reference any of them.
+  // Match the 4th argument (truthy callback) — either block body or expression body
+  const cond0Match = output.match(
+    /__geaRegisterCond\(0,\s*"c0",\s*\(\)\s*=>\s*\{[\s\S]*?\},\s*(\(\)\s*=>\s*\{[\s\S]*?\}|\(\)\s*=>\s*[^,]+),/,
+  )
+  assert.ok(cond0Match, 'should find __geaRegisterCond(0,...) truthy callback')
+  const cond0TruthyCallback = cond0Match![1]
+  assert.doesNotMatch(
+    cond0TruthyCallback,
+    /const\s*\{/,
+    'cond 0 truthy callback (static ✓ span) should not have any destructuring',
+  )
+})
+
 // --- Optimization #7: Array patch with multiple expressions ---
 test('compiler generates patch for array item with multiple text expressions', () => {
   const output = transformComponentSource(`
@@ -268,5 +383,113 @@ test('onAfterRenderAsync is invoked after render', async () => {
     comp.dispose()
   } finally {
     restoreDom()
+  }
+})
+
+async function transformWithFile(source: string, filePath: string): Promise<string> {
+  const plugin = geaPlugin()
+  const transform = typeof plugin.transform === 'function' ? plugin.transform : plugin.transform?.handler
+  const result = await transform?.call({} as never, source, filePath)
+  assert.ok(result, 'plugin transform should return a result')
+  return typeof result === 'string' ? result : result.code
+}
+
+test('deduplicates store observer methods with identical bodies', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gea-dedup-'))
+
+  try {
+    const storePath = join(dir, 'status-store.ts')
+    const componentPath = join(dir, 'StatusDisplay.jsx')
+
+    await writeFile(
+      storePath,
+      `import { Store } from '@geajs/core'
+export default class StatusStore extends Store {
+  activeCount = 0
+  completedCount = 0
+}`,
+    )
+
+    const output = await transformWithFile(
+      `
+        import { Component } from '@geajs/core'
+        import store from './status-store'
+
+        export default class StatusDisplay extends Component {
+          template() {
+            const { activeCount, completedCount } = store
+            return (
+              <p>{activeCount} active, {completedCount} completed</p>
+            )
+          }
+        }
+      `,
+      componentPath,
+    )
+
+    assert.ok(output)
+
+    // Count __observe_store_ method definitions
+    const observeMethods = output.match(/^\s+__observe_store_\w+\s*\(/gm) || []
+    assert.equal(
+      observeMethods.length,
+      1,
+      `Expected 1 observer method but found ${observeMethods.length}: ${observeMethods.join(', ')}`,
+    )
+
+    // Both subscriptions should exist, pointing to the same method
+    const observeCalls = output.match(/this\.__observe\(store/g) || []
+    assert.ok(observeCalls.length >= 2, 'Should have at least 2 __observe subscriptions')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('preserves store observer methods with different bodies', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gea-no-dedup-'))
+
+  try {
+    const storePath = join(dir, 'multi-store.ts')
+    const componentPath = join(dir, 'MultiDisplay.jsx')
+
+    await writeFile(
+      storePath,
+      `import { Store } from '@geajs/core'
+export default class MultiStore extends Store {
+  firstName = 'John'
+  lastName = 'Doe'
+}`,
+    )
+
+    const output = await transformWithFile(
+      `
+        import { Component } from '@geajs/core'
+        import store from './multi-store'
+
+        export default class MultiDisplay extends Component {
+          template() {
+            return (
+              <div>
+                <p>{store.firstName}</p>
+                <p>{store.lastName}</p>
+              </div>
+            )
+          }
+        }
+      `,
+      componentPath,
+    )
+
+    assert.ok(output)
+
+    // Each property updates a different element — both methods should be preserved
+    const observeMethods = output.match(/__observe_store_\w+\s*\(/g) || []
+    assert.equal(
+      observeMethods.length,
+      2,
+      `Expected 2 observer methods but found ${observeMethods.length}: ${observeMethods.join(', ')}`,
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
   }
 })

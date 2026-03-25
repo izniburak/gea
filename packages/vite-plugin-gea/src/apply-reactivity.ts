@@ -1,4 +1,7 @@
+import babelGenerator from '@babel/generator'
 import * as t from '@babel/types'
+
+const generate = 'default' in babelGenerator ? babelGenerator.default : babelGenerator
 import { appendToBody, id, js, jsBlockBody, jsExpr, jsMethod } from 'eszter'
 import type { NodePath } from '@babel/traverse'
 import type { ClassMethod } from '@babel/types'
@@ -2518,6 +2521,58 @@ export function applyStaticReactivity(
                   }
                 }
               })
+            }
+
+            // Deduplicate observer methods with identical bodies.
+            // When a text template references multiple store properties
+            // (e.g. `${store.a} / ${store.b}`), each property gets its own
+            // observer method but the bodies are identical.  Keep one
+            // canonical method and redirect all subscriptions to it.
+            {
+              const seen = new Set<t.ClassMethod>()
+              const methodEntries: Array<{ observeKey: string; method: t.ClassMethod; name: string }> = []
+              addedMethods.forEach((method, observeKey) => {
+                if (seen.has(method)) return
+                seen.add(method)
+                const name = getMethodName(method)
+                if (name) methodEntries.push({ observeKey, method, name })
+              })
+
+              // Group by store + body so we only merge methods for the same store
+              const bodyGroups = new Map<string, typeof methodEntries>()
+              for (const entry of methodEntries) {
+                const { storeVar } = parseObserveKey(entry.observeKey)
+                const bodyCode = (storeVar || '') + ':' + generate(t.blockStatement(entry.method.body.body)).code
+                if (!bodyGroups.has(bodyCode)) bodyGroups.set(bodyCode, [])
+                bodyGroups.get(bodyCode)!.push(entry)
+              }
+
+              const renameMap = new Map<string, string>()
+              for (const [, group] of bodyGroups) {
+                if (group.length < 2) continue
+                const canonical = group[0]
+                for (let i = 1; i < group.length; i++) {
+                  const dup = group[i]
+                  renameMap.set(dup.name, canonical.name)
+                  const idx = classPath.node.body.body.indexOf(dup.method)
+                  if (idx !== -1) classPath.node.body.body.splice(idx, 1)
+                }
+              }
+
+              if (renameMap.size > 0) {
+                for (const [, config] of importedStores) {
+                  for (const [key, entry] of config.observeHandlers) {
+                    if (renameMap.has(entry.methodName)) {
+                      config.observeHandlers.set(key, { ...entry, methodName: renameMap.get(entry.methodName)! })
+                    }
+                  }
+                }
+                for (const [key, entry] of localObserveHandlers) {
+                  if (renameMap.has(entry.methodName)) {
+                    localObserveHandlers.set(key, { ...entry, methodName: renameMap.get(entry.methodName)! })
+                  }
+                }
+              }
             }
 
             if (importedStores.size > 0 || localObserveHandlers.size > 0 || mapRegistrations.length > 0) {

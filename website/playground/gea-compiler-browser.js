@@ -45207,6 +45207,10 @@ function collectAllIdentifierNames(statements, fromIndex, additionalNodes) {
       walk(node.object);
       return;
     }
+    if (libExports.isVariableDeclarator(node)) {
+      walk(node.init);
+      return;
+    }
     for (const key of libExports.VISITOR_KEYS[node.type] || []) {
       const child = node[key];
       if (Array.isArray(child)) {
@@ -46616,8 +46620,24 @@ function collectTextChildren(node, stateRefs, stateProps) {
       const expr = child.expression;
       const isMap = libExports.isCallExpression(expr) && libExports.isMemberExpression(expr.callee) && libExports.isIdentifier(expr.callee.property) && expr.callee.property.name === "map";
       if (!isMap) {
-        textChildren.push({ type: "expression", expression: expr });
-        hasExpr = true;
+        if (libExports.isTemplateLiteral(expr)) {
+          for (let i = 0; i < expr.quasis.length; i++) {
+            const quasi = expr.quasis[i];
+            if (quasi.value.raw) {
+              textChildren.push({ type: "text", value: quasi.value.raw });
+            }
+            if (i < expr.expressions.length) {
+              const innerExpr = expr.expressions[i];
+              if (libExports.isExpression(innerExpr)) {
+                textChildren.push({ type: "expression", expression: innerExpr });
+                hasExpr = true;
+              }
+            }
+          }
+        } else {
+          textChildren.push({ type: "expression", expression: expr });
+          hasExpr = true;
+        }
       }
     }
   });
@@ -47809,6 +47829,51 @@ function pascalToKebabCase(tagName) {
 function camelToKebab(name) {
   return name.replace(/([A-Z])/g, "-$1").toLowerCase();
 }
+function tryStaticClassObjectToString(expr) {
+  const parts = [];
+  for (const prop of expr.properties) {
+    if (!libExports.isObjectProperty(prop) || prop.computed) return null;
+    const key = libExports.isIdentifier(prop.key) ? prop.key.name : libExports.isStringLiteral(prop.key) ? prop.key.value : null;
+    if (!key) return null;
+    if (libExports.isBooleanLiteral(prop.value)) {
+      if (prop.value.value) parts.push(key);
+    } else {
+      return null;
+    }
+  }
+  return parts.join(" ");
+}
+function buildClassObjectExpression(expr) {
+  return libExports.callExpression(
+    libExports.memberExpression(
+      libExports.callExpression(
+        libExports.memberExpression(
+          libExports.callExpression(
+            libExports.memberExpression(
+              libExports.callExpression(libExports.memberExpression(libExports.identifier("Object"), libExports.identifier("entries")), [expr]),
+              libExports.identifier("filter")
+            ),
+            [
+              libExports.arrowFunctionExpression(
+                [libExports.arrayPattern([libExports.identifier("__k"), libExports.identifier("__v")])],
+                libExports.identifier("__v")
+              )
+            ]
+          ),
+          libExports.identifier("map")
+        ),
+        [
+          libExports.arrowFunctionExpression(
+            [libExports.arrayPattern([libExports.identifier("__k")])],
+            libExports.identifier("__k")
+          )
+        ]
+      ),
+      libExports.identifier("join")
+    ),
+    [libExports.stringLiteral(" ")]
+  );
+}
 function tryStaticStyleObjectToCSS(expr) {
   const parts = [];
   for (const prop of expr.properties) {
@@ -47914,6 +47979,7 @@ function canBeBoolean(expr) {
 }
 function isAlwaysTruthy(expr) {
   if (libExports.isStringLiteral(expr) || libExports.isNumericLiteral(expr) || libExports.isTemplateLiteral(expr)) return true;
+  if (libExports.isObjectExpression(expr) || libExports.isArrayExpression(expr)) return true;
   if (libExports.isConditionalExpression(expr)) return isAlwaysTruthy(expr.consequent) && isAlwaysTruthy(expr.alternate);
   return false;
 }
@@ -48517,6 +48583,21 @@ function processElement(node, parts, ctx, elementPath = []) {
           err.__geaCompileError = true;
           throw err;
         }
+        if (propAttrName === "class" && libExports.isObjectExpression(rawExpr)) {
+          const staticClass = tryStaticClassObjectToString(rawExpr);
+          if (staticClass !== null) {
+            if (staticClass) {
+              html += ` class="${staticClass}"`;
+            }
+            return;
+          }
+          parts.push({ type: "string", value: html });
+          const classExpr = buildClassObjectExpression(rawExpr);
+          parts.push({ type: "string", value: ` class="` });
+          parts.push({ type: "expression", value: classExpr });
+          html = '"';
+          return;
+        }
         if (propAttrName === "style" && libExports.isObjectExpression(rawExpr)) {
           const staticCSS = tryStaticStyleObjectToCSS(rawExpr);
           if (staticCSS) {
@@ -48529,21 +48610,27 @@ function processElement(node, parts, ctx, elementPath = []) {
             [libExports.stringLiteral("; ")]
           );
           const skipCondition2 = buildAttrSkipCondition(styleExpr, rawExpr);
-          parts.push({
-            type: "expression",
-            value: libExports.conditionalExpression(
-              skipCondition2,
-              libExports.stringLiteral(""),
-              libExports.templateLiteral(
-                [
-                  libExports.templateElement({ raw: ' style="', cooked: ' style="' }, false),
-                  libExports.templateElement({ raw: '"', cooked: '"' }, true)
-                ],
-                [styleExpr]
+          if (libExports.isBooleanLiteral(skipCondition2) && !skipCondition2.value) {
+            parts.push({ type: "string", value: ` style="` });
+            parts.push({ type: "expression", value: styleExpr });
+            html = '"';
+          } else {
+            parts.push({
+              type: "expression",
+              value: libExports.conditionalExpression(
+                skipCondition2,
+                libExports.stringLiteral(""),
+                libExports.templateLiteral(
+                  [
+                    libExports.templateElement({ raw: ' style="', cooked: ' style="' }, false),
+                    libExports.templateElement({ raw: '"', cooked: '"' }, true)
+                  ],
+                  [styleExpr]
+                )
               )
-            )
-          });
-          html = "";
+            });
+            html = "";
+          }
           return;
         }
         parts.push({ type: "string", value: html });
@@ -49424,6 +49511,19 @@ function rewriteStateRefs(expr, stateRefs) {
       const ref = stateRefs.get(path.node.name);
       if (ref.kind === "local") {
         path.replaceWith(libExports.thisExpression());
+      } else if (ref.kind === "imported-destructured" && ref.storeVar && ref.propName) {
+        path.replaceWith(
+          libExports.memberExpression(
+            libExports.memberExpression(libExports.identifier(ref.storeVar), libExports.identifier("__store")),
+            libExports.identifier(ref.propName)
+          )
+        );
+        path.skip();
+      } else if (ref.kind === "local-destructured" && ref.propName) {
+        path.replaceWith(
+          libExports.memberExpression(libExports.thisExpression(), libExports.identifier(ref.propName))
+        );
+        path.skip();
       } else {
         path.replaceWith(
           libExports.memberExpression(
@@ -51408,6 +51508,29 @@ function generateComponentArrayResult(um, arrayPropName, imports, propNames, _cl
     itemPropsCallArgs
   );
   const itemPropsSetup = collectTemplateSetupStatements(finalPropsExpr, templateSetupContext);
+  const storeVarNames = /* @__PURE__ */ new Set();
+  if (storeArrayAccess) storeVarNames.add(storeArrayAccess.storeVar);
+  for (const stmt of [...itemPropsSetup, ...arrSetupStatements]) {
+    if (!libExports.isVariableDeclaration(stmt)) continue;
+    for (const decl of stmt.declarations) {
+      if (libExports.isIdentifier(decl.init) && imports.has(decl.init.name)) {
+        storeVarNames.add(decl.init.name);
+      }
+    }
+  }
+  const rewriteStoreDestructuring = (stmts) => {
+    if (storeVarNames.size === 0) return;
+    for (const stmt of stmts) {
+      if (!libExports.isVariableDeclaration(stmt)) continue;
+      for (const decl of stmt.declarations) {
+        if (libExports.isIdentifier(decl.init) && storeVarNames.has(decl.init.name)) {
+          decl.init = libExports.memberExpression(libExports.identifier(decl.init.name), libExports.identifier("__raw"));
+        }
+      }
+    }
+  };
+  rewriteStoreDestructuring(itemPropsSetup);
+  rewriteStoreDestructuring(arrSetupStatements);
   const itemPropsMethod = jsMethod`${id(itemPropsMethodName)}(opt) {}`;
   if (indexVar) itemPropsMethod.params.push(libExports.identifier("__k"));
   itemPropsMethod.body.body.push(...itemPropsSetup, libExports.returnStatement(finalPropsExpr));
@@ -51448,6 +51571,7 @@ function generateComponentArrayResult(um, arrayPropName, imports, propNames, _cl
   };
 }
 
+const generate$1 = "default" in babelGenerator ? babelGenerator.default : babelGenerator;
 const traverse$4 = babelTraverse.default || babelTraverse;
 const BOOLEAN_HTML_ATTRS = /* @__PURE__ */ new Set([
   "disabled",
@@ -51571,10 +51695,10 @@ function generateCreatedHooks(stores, hasArrayConfigs, observeListConfigs = []) 
         libExports.objectProperty(
           libExports.identifier("props"),
           libExports.arrowFunctionExpression(
-            [libExports.identifier("opt")],
+            [libExports.identifier("opt"), libExports.identifier("__k")],
             libExports.callExpression(
               libExports.memberExpression(libExports.thisExpression(), libExports.identifier(itemPropsMethodName)),
-              [libExports.identifier("opt")]
+              [libExports.identifier("opt"), libExports.identifier("__k")]
             )
           )
         ),
@@ -51815,16 +51939,46 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                 consequent
               );
             } else if (pb.type === "class") {
+              const isObjectClass = pb.expression && libExports.isObjectExpression(pb.expression);
+              const classValueExpr = isObjectClass ? libExports.callExpression(
+                libExports.memberExpression(
+                  libExports.callExpression(
+                    libExports.memberExpression(
+                      libExports.callExpression(
+                        libExports.memberExpression(
+                          libExports.callExpression(
+                            libExports.memberExpression(libExports.identifier("Object"), libExports.identifier("entries")),
+                            [libExports.cloneNode(valueExpr, true)]
+                          ),
+                          libExports.identifier("filter")
+                        ),
+                        [
+                          libExports.arrowFunctionExpression(
+                            [libExports.arrayPattern([libExports.identifier("__k"), libExports.identifier("__v")])],
+                            libExports.identifier("__v")
+                          )
+                        ]
+                      ),
+                      libExports.identifier("map")
+                    ),
+                    [
+                      libExports.arrowFunctionExpression(
+                        [libExports.arrayPattern([libExports.identifier("__k")])],
+                        libExports.identifier("__k")
+                      )
+                    ]
+                  ),
+                  libExports.identifier("join")
+                ),
+                [libExports.stringLiteral(" ")]
+              ) : libExports.conditionalExpression(
+                libExports.binaryExpression("!=", valueExpr, libExports.nullLiteral()),
+                libExports.callExpression(libExports.identifier("String"), [libExports.cloneNode(valueExpr, true)]),
+                libExports.stringLiteral("")
+              );
               updateStmt = libExports.blockStatement([
                 libExports.variableDeclaration("const", [
-                  libExports.variableDeclarator(
-                    libExports.identifier("__newClass"),
-                    libExports.conditionalExpression(
-                      libExports.binaryExpression("!=", valueExpr, libExports.nullLiteral()),
-                      libExports.callExpression(libExports.identifier("String"), [libExports.cloneNode(valueExpr, true)]),
-                      libExports.stringLiteral("")
-                    )
-                  )
+                  libExports.variableDeclarator(libExports.identifier("__newClass"), classValueExpr)
                 ]),
                 libExports.ifStatement(
                   libExports.binaryExpression(
@@ -52123,6 +52277,7 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
           const componentArrayDisposeTargets = [];
           const storeComponentArrayObservers = [];
           const observeListConfigs = [];
+          const staticArrayRefreshOnMount = [];
           const mapItemAttrInfos = [];
           const tmplBody = templateMethod?.body.body ?? [];
           let tmplReturnIdx = -1;
@@ -52328,11 +52483,14 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                   });
                 }
                 componentArrayDisposeTargets.push(getComponentArrayItemsName(arrayPropName));
-                replaceMapWithComponentArrayItems(
+                const wasReplacedInTemplate = replaceMapWithComponentArrayItems(
                   templateMethod,
                   um.computationExpr,
                   getComponentArrayItemsName(arrayPropName)
                 );
+                if (!wasReplacedInTemplate && !storeArrayAccess) {
+                  staticArrayRefreshOnMount.push(getComponentArrayRefreshMethodName(arrayPropName));
+                }
                 applied = true;
               }
               return;
@@ -52727,6 +52885,16 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
             if (!childObserveGroups.has(observeKey)) {
               if (conditionalSlotIndices.length > 0) continue;
               if (analysis.conditionalSlotScopedStoreKeys?.has(observeKey)) continue;
+              if (storeVar && propPath.length >= 1) {
+                const storeRef = stateRefs.get(storeVar);
+                const getterDepPaths = storeRef?.getterDeps?.get(propPath[0]);
+                if (getterDepPaths && getterDepPaths.length > 0) {
+                  const allDepsCovered = getterDepPaths.every(
+                    (depPath) => childObserveGroups.has(buildObserveKey(depPath, storeVar))
+                  );
+                  if (allDepsCovered) continue;
+                }
+              }
               mergeObserveMethod(observeKey, generateRerenderObserver(propPath, storeVar, guardStateKeys.has(observeKey)));
             } else if (guardStateKeys.has(observeKey)) {
               mergeObserveMethod(observeKey, generateRerenderObserver(propPath, storeVar, true));
@@ -52832,8 +53000,8 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                   return false;
                 }
                 return true;
-              }).map(
-                (child) => libExports.expressionStatement(
+              }).map((child) => {
+                const updateExpr = libExports.expressionStatement(
                   libExports.callExpression(
                     libExports.memberExpression(
                       libExports.memberExpression(libExports.thisExpression(), libExports.identifier(child.instanceVar)),
@@ -52849,8 +53017,14 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                       )
                     ]
                   )
-                )
-              );
+                );
+                if (!child.lazy) return updateExpr;
+                const backingField = `__lazy${child.instanceVar}`;
+                return libExports.ifStatement(
+                  libExports.memberExpression(libExports.thisExpression(), libExports.identifier(backingField)),
+                  libExports.blockStatement([updateExpr])
+                );
+              });
               if (existing && libExports.isBlockStatement(existing.body)) {
                 existing.body.body.unshift(...calls);
               } else {
@@ -52945,6 +53119,7 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
             addJoinToUnresolvedMapCalls(templateMethod, analysis.unresolvedMaps);
           }
           const componentArrayMaps = [];
+          const componentArrayItemPropsMethods = /* @__PURE__ */ new Map();
           const htmlArrayMaps = [];
           for (const arrayMap of analysis.arrayMaps) {
             const compChild = isUnresolvedMapWithComponentChild(
@@ -52999,6 +53174,7 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
             );
             if (arrayResult && templateMethod) {
               classPath.node.body.body.push(arrayResult.itemPropsMethod);
+              componentArrayItemPropsMethods.set(arrayMap, arrayResult.itemPropsMethod);
               const importSource = imports.get(arrayResult.componentTag);
               if (importSource) {
                 const delegatedEvents = getHoistableRootEventsForImport(sourceFile, importSource).map((meta) => ({
@@ -53028,11 +53204,14 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
               }
               componentArrayDisposeTargets.push(getComponentArrayItemsName(arrayPropName));
               const mapReplaceExpr = storeArrayAccess ? libExports.memberExpression(libExports.identifier(storeArrayAccess.storeVar), libExports.identifier(storeArrayAccess.propName)) : computationExpr;
-              replaceMapWithComponentArrayItems(
+              const wasReplaced = replaceMapWithComponentArrayItems(
                 templateMethod,
                 mapReplaceExpr,
                 getComponentArrayItemsName(arrayPropName)
               );
+              if (!wasReplaced && !arrayMap.storeVar) {
+                staticArrayRefreshOnMount.push(getComponentArrayRefreshMethodName(arrayPropName));
+              }
               applied = true;
             }
           }
@@ -53041,10 +53220,77 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
             const storeRef = stateRefs.get(arrayMap.storeVar);
             const getterDepPaths = storeRef?.getterDeps?.get(arrayMap.arrayPathParts[0]);
             if (!getterDepPaths || getterDepPaths.length === 0) continue;
-            const pathKey = arrayMap.arrayPathParts[0];
+            const pathKey = arrayMap.arrayPathParts.join(".");
             for (const depPath of getterDepPaths) {
               const depObserveKey = buildObserveKey(depPath, arrayMap.storeVar);
               const depMethodName = getObserveMethodName(depPath, arrayMap.storeVar);
+              const refreshStmt = libExports.expressionStatement(
+                libExports.callExpression(
+                  libExports.memberExpression(libExports.thisExpression(), libExports.identifier("__refreshList")),
+                  [libExports.stringLiteral(pathKey)]
+                )
+              );
+              const existing = addedMethods.get(depObserveKey);
+              if (existing && libExports.isBlockStatement(existing.body)) {
+                const renderedGuardIdx = existing.body.body.findIndex(
+                  (s) => libExports.isIfStatement(s) && libExports.isMemberExpression(s.test) && libExports.isIdentifier(s.test.property) && s.test.property.name === "rendered_"
+                );
+                if (renderedGuardIdx >= 0) {
+                  existing.body.body.splice(renderedGuardIdx, 0, refreshStmt);
+                } else {
+                  existing.body.body.push(refreshStmt);
+                }
+              } else {
+                const delegateMethod = libExports.classMethod(
+                  "method",
+                  libExports.identifier(depMethodName),
+                  [libExports.identifier("__v"), libExports.identifier("__c")],
+                  libExports.blockStatement([refreshStmt])
+                );
+                mergeObserveMethod(depObserveKey, delegateMethod);
+              }
+            }
+          }
+          for (const arrayMap of componentArrayMaps) {
+            if (!arrayMap.storeVar) continue;
+            const itemPropsMethod = componentArrayItemPropsMethods.get(arrayMap);
+            if (!itemPropsMethod) continue;
+            const pathKey = arrayMap.arrayPathParts.join(".");
+            const storeRef = stateRefs.get(arrayMap.storeVar);
+            const getterDepPaths = storeRef?.getterDeps?.get(arrayMap.arrayPathParts[0]);
+            const getterDepKeys = new Set(
+              (getterDepPaths || []).map((dp) => buildObserveKey(dp, arrayMap.storeVar))
+            );
+            const externalDeps = /* @__PURE__ */ new Map();
+            const clonedBody = libExports.cloneNode(itemPropsMethod.body, true);
+            traverse$4(libExports.program([libExports.expressionStatement(libExports.arrowFunctionExpression([], clonedBody))]), {
+              noScope: true,
+              Identifier(idPath) {
+                if (idPath.parentPath && libExports.isMemberExpression(idPath.parentPath.node) && idPath.parentPath.node.property === idPath.node && !idPath.parentPath.node.computed)
+                  return;
+                const ref = stateRefs.get(idPath.node.name);
+                if (!ref) return;
+                if (itemPropsMethod.params.some((p) => libExports.isIdentifier(p) && p.name === idPath.node.name)) return;
+                if (ref.kind === "imported-destructured" && ref.storeVar && ref.propName) {
+                  const depKey = buildObserveKey([ref.propName], ref.storeVar);
+                  if (!getterDepKeys.has(depKey) && !externalDeps.has(depKey)) {
+                    externalDeps.set(depKey, { parts: [ref.propName], storeVar: ref.storeVar });
+                  }
+                }
+              },
+              MemberExpression(mePath) {
+                const resolved = resolvePath(mePath.node, stateRefs);
+                if (!resolved?.parts?.length || !resolved.isImportedState) return;
+                if (resolved.parts.some((p) => p === "__raw")) return;
+                const depKey = buildObserveKey(resolved.parts, resolved.storeVar);
+                if (!getterDepKeys.has(depKey) && !externalDeps.has(depKey)) {
+                  externalDeps.set(depKey, { parts: [...resolved.parts], storeVar: resolved.storeVar });
+                }
+              }
+            });
+            for (const [depKey, dep] of externalDeps) {
+              const depMethodName = getObserveMethodName(dep.parts, dep.storeVar);
+              if (!stateProps.has(depKey)) stateProps.set(depKey, dep.parts);
               const delegateBody = libExports.blockStatement([
                 libExports.expressionStatement(
                   libExports.callExpression(
@@ -53059,7 +53305,7 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                 [libExports.identifier("__v"), libExports.identifier("__c")],
                 delegateBody
               );
-              mergeObserveMethod(depObserveKey, delegateMethod);
+              mergeObserveMethod(depKey, delegateMethod);
             }
           }
           const renderEventHandlers = [];
@@ -53339,6 +53585,48 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                 }
               });
             }
+            {
+              const seen = /* @__PURE__ */ new Set();
+              const methodEntries = [];
+              addedMethods.forEach((method, observeKey) => {
+                if (seen.has(method)) return;
+                seen.add(method);
+                const name = getMethodName(method);
+                if (name) methodEntries.push({ observeKey, method, name });
+              });
+              const bodyGroups = /* @__PURE__ */ new Map();
+              for (const entry of methodEntries) {
+                const { storeVar } = parseObserveKey(entry.observeKey);
+                const bodyCode = (storeVar || "") + ":" + generate$1(libExports.blockStatement(entry.method.body.body)).code;
+                if (!bodyGroups.has(bodyCode)) bodyGroups.set(bodyCode, []);
+                bodyGroups.get(bodyCode).push(entry);
+              }
+              const renameMap = /* @__PURE__ */ new Map();
+              for (const [, group] of bodyGroups) {
+                if (group.length < 2) continue;
+                const canonical = group[0];
+                for (let i = 1; i < group.length; i++) {
+                  const dup = group[i];
+                  renameMap.set(dup.name, canonical.name);
+                  const idx = classPath.node.body.body.indexOf(dup.method);
+                  if (idx !== -1) classPath.node.body.body.splice(idx, 1);
+                }
+              }
+              if (renameMap.size > 0) {
+                for (const [, config] of importedStores) {
+                  for (const [key, entry] of config.observeHandlers) {
+                    if (renameMap.has(entry.methodName)) {
+                      config.observeHandlers.set(key, { ...entry, methodName: renameMap.get(entry.methodName) });
+                    }
+                  }
+                }
+                for (const [key, entry] of localObserveHandlers) {
+                  if (renameMap.has(entry.methodName)) {
+                    localObserveHandlers.set(key, { ...entry, methodName: renameMap.get(entry.methodName) });
+                  }
+                }
+              }
+            }
             if (importedStores.size > 0 || localObserveHandlers.size > 0 || mapRegistrations.length > 0) {
               const storeConfigs = Array.from(importedStores.entries()).map(([storeVar, config]) => ({
                 storeVar,
@@ -53359,6 +53647,23 @@ function applyStaticReactivity(ast, originalAST, className, sourceFile, imports,
                   createdHooksMethod.body.body.push(...mapRegistrations);
                 }
                 classPath.node.body.body.push(createdHooksMethod);
+              }
+              if (staticArrayRefreshOnMount.length > 0) {
+                const refreshStmts = [...new Set(staticArrayRefreshOnMount)].map(
+                  (name) => libExports.expressionStatement(
+                    libExports.callExpression(
+                      libExports.memberExpression(libExports.thisExpression(), libExports.identifier(name)),
+                      []
+                    )
+                  )
+                );
+                const existingHook = classPath.node.body.body.find(
+                  (m) => libExports.isClassMethod(m) && libExports.isIdentifier(m.key) && m.key.name === "onAfterRenderHooks"
+                );
+                if (existingHook) existingHook.body.body.push(...refreshStmts);
+                else classPath.node.body.body.push(
+                  libExports.classMethod("method", libExports.identifier("onAfterRenderHooks"), [], libExports.blockStatement(refreshStmts))
+                );
               }
               if (localObserveHandlers.size > 0) {
                 classPath.node.body.body.push(
@@ -53655,7 +53960,7 @@ function getArrayPropNameFromExpr(expr) {
   return null;
 }
 function replaceMapWithComponentArrayItems(templateMethod, arrayExpr, itemsName) {
-  if (!arrayExpr || !libExports.isBlockStatement(templateMethod.body)) return;
+  if (!arrayExpr || !libExports.isBlockStatement(templateMethod.body)) return false;
   const tempProg = libExports.program([
     libExports.expressionStatement(libExports.arrowFunctionExpression(templateMethod.params, templateMethod.body))
   ]);
@@ -53681,6 +53986,7 @@ function replaceMapWithComponentArrayItems(templateMethod, arrayExpr, itemsName)
       replaced = true;
     }
   });
+  return replaced;
 }
 function inlineIntoConstructor(classBody, statements) {
   let ctor = classBody.body.find(

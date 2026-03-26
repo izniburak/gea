@@ -29,7 +29,7 @@
     "test": "tsx --conditions source --test tests/**/*.test.ts"
   },
   "peerDependencies": {
-    "@geajs/core": "^1.0.0",
+    "@geajs/core": "file:../../packages/gea",
     "vite": "^8.0.0"
   },
   "peerDependenciesMeta": {

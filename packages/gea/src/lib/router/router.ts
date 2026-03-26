@@ -51,6 +51,7 @@ function buildUrl(target: string | NavigationTarget): { path: string; search: st
 }
 
 export class Router<T extends RouteMap = RouteMap> extends Store {
+  static _ssrRouterResolver: (() => object | null) | null = null
   readonly routeConfig: T
   // Reactive class fields (tracked by Store proxy)
   path = ''

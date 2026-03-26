@@ -1780,6 +1780,9 @@ export function applyStaticReactivity(
                       t.isCallExpression(expr) &&
                       t.isMemberExpression(expr.callee) &&
                       t.isIdentifier(expr.callee.property, { name: 'join' }) &&
+                      expr.arguments.length === 1 &&
+                      t.isStringLiteral(expr.arguments[0]) &&
+                      expr.arguments[0].value === '' &&
                       t.isCallExpression(expr.callee.object) &&
                       t.isMemberExpression(expr.callee.object.callee) &&
                       t.isIdentifier(expr.callee.object.callee.property, { name: 'map' })
@@ -1800,6 +1803,9 @@ export function applyStaticReactivity(
                       t.isCallExpression(expr.left) &&
                       t.isMemberExpression(expr.left.callee) &&
                       t.isIdentifier(expr.left.callee.property, { name: 'join' }) &&
+                      expr.left.arguments.length === 1 &&
+                      t.isStringLiteral(expr.left.arguments[0]) &&
+                      expr.left.arguments[0].value === '' &&
                       t.isCallExpression(expr.left.callee.object) &&
                       t.isMemberExpression(expr.left.callee.object.callee) &&
                       t.isIdentifier(expr.left.callee.object.callee.property, { name: 'map' })

@@ -907,7 +907,9 @@ function processElement(node: t.JSXElement, parts: TemplatePart[], ctx: Ctx, ele
   } else {
     const rawPathKey = elementPath.join(' > ')
     const pathKey = ctx.elementPathPrefix ? ctx.elementPathPrefix + ' > ' + rawPathKey : rawPathKey
-    const bindingId = ctx.elementPathToBindingId?.get(pathKey) ?? ctx.elementPathToBindingId?.get(rawPathKey)
+    const bindingId =
+      ctx.elementPathToBindingId?.get(pathKey) ??
+      (ctx.elementPathPrefix ? undefined : ctx.elementPathToBindingId?.get(rawPathKey))
     if (bindingId !== undefined && bindingId !== '') {
       parts.push({ type: 'string', value: html + ' id="' })
       parts.push({
@@ -1016,7 +1018,9 @@ function processElement(node: t.JSXElement, parts: TemplatePart[], ctx: Ctx, ele
         } else {
           const rawPathKey2 = elementPath.join(' > ')
           const pathKey2 = ctx.elementPathPrefix ? ctx.elementPathPrefix + ' > ' + rawPathKey2 : rawPathKey2
-          const bindingId = ctx.elementPathToBindingId?.get(pathKey2) ?? ctx.elementPathToBindingId?.get(rawPathKey2)
+          const bindingId =
+            ctx.elementPathToBindingId?.get(pathKey2) ??
+            (ctx.elementPathPrefix ? undefined : ctx.elementPathToBindingId?.get(rawPathKey2))
           if (!ctx.inMapCallback && bindingId !== undefined) {
             selectorExpression = buildEventSelectorExpression(bindingId)
           } else if (!ctx.inMapCallback && !ctx.inChildrenProp && !explicitIdAttr) {

@@ -102,8 +102,8 @@ export class KanbanStore extends Store {
     this.selectedTaskId = null
   }
 
-  setDraftTitle(e: { target: { value: string } }): void {
-    this.draftTitle = e.target.value
+  setDraftTitle(e: Event): void {
+    this.draftTitle = (e.target as HTMLInputElement).value
   }
 
   startAdding(columnId: string): void {

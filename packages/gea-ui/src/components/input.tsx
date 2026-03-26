@@ -1,5 +1,4 @@
 import { Component } from '@geajs/core'
-import type { FormEvent } from 'react'
 import { cn } from '../utils/cn'
 
 export default class Input extends Component {
@@ -16,7 +15,7 @@ export default class Input extends Component {
         disabled={props.disabled}
         name={props.name}
         id={props.inputId}
-        onInput={(e: FormEvent<HTMLInputElement>) => props.onInput?.(e.nativeEvent as InputEvent)}
+        input={(e: Event) => props.onInput?.(e)}
       />
     )
   }

@@ -19,16 +19,16 @@ export class PaymentStore extends Store {
     return digits
   }
 
-  setPassengerName(e: { target: { value: string } }): void {
-    this.passengerName = e.target.value
+  setPassengerName(e: Event): void {
+    this.passengerName = (e.target as HTMLInputElement).value
   }
 
-  setCardNumber(e: { target: { value: string } }): void {
-    this.cardNumber = this.formatCardNumber(e.target.value)
+  setCardNumber(e: Event): void {
+    this.cardNumber = this.formatCardNumber((e.target as HTMLInputElement).value)
   }
 
-  setExpiry(e: { target: { value: string } }): void {
-    this.expiry = this.formatExpiry(e.target.value)
+  setExpiry(e: Event): void {
+    this.expiry = this.formatExpiry((e.target as HTMLInputElement).value)
   }
 
   processPayment(): void {

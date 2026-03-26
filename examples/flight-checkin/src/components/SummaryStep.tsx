@@ -1,12 +1,6 @@
 import PaymentForm from './PaymentForm'
 import StepHeader from './StepHeader'
 
-interface TextInputEvent {
-  target: {
-    value: string
-  }
-}
-
 interface SummaryStepProps {
   basePrice: number
   luggagePrice: number
@@ -17,9 +11,9 @@ interface SummaryStepProps {
   passengerName: string
   cardNumber: string
   expiry: string
-  onPassengerNameChange: (event: TextInputEvent) => void
-  onCardNumberChange: (event: TextInputEvent) => void
-  onExpiryChange: (event: TextInputEvent) => void
+  onPassengerNameChange: (event: Event) => void
+  onCardNumberChange: (event: Event) => void
+  onExpiryChange: (event: Event) => void
   onPay: () => void
   onBack: () => void
   onViewBoardingPass: () => void

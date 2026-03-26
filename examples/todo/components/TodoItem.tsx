@@ -8,12 +8,6 @@ interface TodoItemProps {
   onRename: (text: string) => void
 }
 
-interface TextInputEvent {
-  target: {
-    value: string
-  }
-}
-
 interface KeyEventLike {
   key: string
 }
@@ -44,8 +38,8 @@ export default class TodoItem extends Component {
     }
   }
 
-  handleEditInput(e: TextInputEvent): void {
-    this.editText = e.target.value
+  handleEditInput(e: Event): void {
+    this.editText = (e.target as HTMLInputElement).value
   }
 
   template({ todo, onToggle, onRemove }: TodoItemProps) {

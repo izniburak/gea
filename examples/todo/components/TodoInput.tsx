@@ -1,16 +1,10 @@
-interface TextInputEvent {
-  target: {
-    value: string
-  }
-}
-
 interface KeyEventLike {
   key: string
 }
 
 interface TodoInputProps {
   draft: string
-  onDraftChange: (event: TextInputEvent) => void
+  onDraftChange: (event: Event) => void
   onAdd: () => void
 }
 

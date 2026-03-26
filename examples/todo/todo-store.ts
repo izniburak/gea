@@ -17,8 +17,8 @@ export class TodoStore extends Store {
   filter: Filter = 'all'
   draft = ''
 
-  setDraft(e: { target: { value: string } }): void {
-    this.draft = e.target.value
+  setDraft(e: Event): void {
+    this.draft = (e.target as HTMLInputElement).value
   }
 
   add(text?: string): void {

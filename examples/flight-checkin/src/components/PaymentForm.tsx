@@ -1,17 +1,11 @@
-interface TextInputEvent {
-  target: {
-    value: string
-  }
-}
-
 interface PaymentFormProps {
   passengerName: string
   cardNumber: string
   expiry: string
   totalPrice: number
-  onPassengerNameChange: (event: TextInputEvent) => void
-  onCardNumberChange: (event: TextInputEvent) => void
-  onExpiryChange: (event: TextInputEvent) => void
+  onPassengerNameChange: (event: Event) => void
+  onCardNumberChange: (event: Event) => void
+  onExpiryChange: (event: Event) => void
   onPay: () => void
 }
 

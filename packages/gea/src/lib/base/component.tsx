@@ -9,7 +9,7 @@ type AnyComponent = Component<any>
  * Declared React `Component` surface + `render(): ReactNode` overload so Gea classes are valid JSX class
  * tags while `JSX.IntrinsicElements` is sourced from `@types/react`. Runtime is still Gea-only.
  */
-export default class Component<P = Record<string, unknown>> extends Store {
+export default class Component<P = Record<string, any>> extends Store {
   declare context: unknown
   declare state: unknown
   declare setState: (...args: any[]) => void

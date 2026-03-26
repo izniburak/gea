@@ -308,9 +308,7 @@ export function geaPlugin(): Plugin {
         storeModules.add(filePath)
         const className = extractStoreClassName(source)
         if (className) {
-          const hasDefaultExport =
-            /export\s+default\s+new\s+\w+/.test(source) ||
-            /export\s+default\s+\w+/.test(source)
+          const hasDefaultExport = /export\s+default\s+new\s+\w+/.test(source) || /export\s+default\s+\w+/.test(source)
           storeRegistry.set(filePath, { className, hasDefaultExport })
         }
         return true

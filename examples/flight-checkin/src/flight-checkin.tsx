@@ -24,7 +24,6 @@ export default class FlightCheckin extends Component {
         <h2>
           {FLIGHT_INFO.departure} → {FLIGHT_INFO.arrival} · {FLIGHT_INFO.date}
         </h2>
-
         {step === 1 && (
           <OptionStep
             stepNumber={1}

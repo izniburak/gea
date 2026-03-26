@@ -1,4 +1,4 @@
-import { Sidebar, ViewManager } from '@geajs/mobile'
+import { Sidebar, View, ViewManager } from '@geajs/mobile'
 import AppSidebar from './components/AppSidebar'
 import HomeView from './views/HomeView'
 import FeedView from './views/FeedView'
@@ -16,7 +16,7 @@ const sidebar = new AppSidebar()
 sidebar.vm = vm
 sidebar.render()
 
-const viewFactories: Record<ViewName, () => object> = {
+const viewFactories: Record<ViewName, () => View> = {
   home: () => {
     const v = new HomeView()
     v.onNavigate = (name: ViewName) => navigateTo(name, true)

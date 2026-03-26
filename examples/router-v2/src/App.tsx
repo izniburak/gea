@@ -33,7 +33,7 @@ const routes = {
       },
       '/settings': {
         layout: SettingsLayout,
-        mode: { type: 'query', param: 'tab' },
+        mode: { type: 'query' as const, param: 'tab' },
         children: {
           profile: ProfileSettings,
           billing: BillingSettings,

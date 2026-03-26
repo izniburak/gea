@@ -24,6 +24,12 @@ function isClonable(value: unknown): boolean {
   return proto === Object.prototype || proto === null
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
 function assertClonable(key: string, value: unknown): void {
   if (!isClonable(value)) {
     const typeName = value === null ? 'null'
@@ -40,13 +46,19 @@ export function deepClone(key: string, value: unknown): unknown {
   if (value === null || value === undefined) return value
   const t = typeof value
   if (t === 'string' || t === 'number' || t === 'boolean') return value
-  assertClonable(key, value)
   if (value instanceof Date) return new Date(value.getTime())
   if (Array.isArray(value)) return value.map((item, i) => deepClone(`${key}[${i}]`, item))
-  // Plain object
+  if (!isPlainObject(value)) {
+    const typeName = Object.getPrototypeOf(value)?.constructor?.name ?? typeof value
+    throw new Error(
+      `[GEA SSR] Store property "${key}" contains an unsupported type (${typeName}). ` +
+      'Only primitives, plain objects, arrays, and Dates are supported in SSR store data.',
+    )
+  }
+  // Plain object — TypeScript knows value is Record<string, unknown>
   const result: Record<string, unknown> = {}
-  for (const k of Object.keys(value as Record<string, unknown>)) {
-    result[k] = deepClone(`${key}.${k}`, (value as Record<string, unknown>)[k])
+  for (const k of Object.keys(value)) {
+    result[k] = deepClone(`${key}.${k}`, value[k])
   }
   return result
 }
@@ -77,8 +89,12 @@ export function cloneStoreData(store: object): Record<string, unknown> {
  * Get the raw target from a Store Proxy, or return the object as-is.
  */
 function unwrapProxy(store: object): object {
-  const raw = (store as Record<string, unknown>).__getRawTarget
-  return (typeof raw === 'object' && raw !== null) ? raw as object : store
+  // Access __getRawTarget via Reflect.get (not `in`) because the Store Proxy's
+  // `has` trap delegates internal props to Reflect.has on the raw target, which
+  // returns false since __getRawTarget is synthetic — only the `get` trap handles it.
+  const raw: unknown = Reflect.get(store, '__getRawTarget')
+  if (typeof raw === 'object' && raw !== null) return raw
+  return store
 }
 
 /**

@@ -11,9 +11,22 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const pluginDir = dirname(fileURLToPath(import.meta.url))
-const traverse = typeof (babelTraverse as any).default === 'function' ? (babelTraverse as any).default : babelTraverse
-const generate =
-  typeof (babelGenerator as any).default === 'function' ? (babelGenerator as any).default : babelGenerator
+// CJS/ESM interop: some bundlers wrap the export in { default: fn }
+function resolveDefault(mod: unknown): Function {
+  if (typeof mod === 'function') return mod
+  if (typeof mod === 'object' && mod !== null && 'default' in mod && typeof mod.default === 'function') {
+    return mod.default
+  }
+  throw new Error('resolveDefault: expected a function or module with default export')
+}
+const traverse = resolveDefault(babelTraverse)
+const generate = resolveDefault(babelGenerator)
+
+function hasSSREnvironment(ctx: object): boolean {
+  if (!('environment' in ctx)) return false
+  const env = ctx.environment
+  return typeof env === 'object' && env !== null && 'name' in env && env.name === 'ssr'
+}
 
 const RECONCILE_ID = 'virtual:gea-reconcile'
 const RESOLVED_RECONCILE_ID = '\0' + RECONCILE_ID
@@ -388,7 +401,7 @@ export function geaPlugin(): Plugin {
       if (id === RESOLVED_STORE_REGISTRY_ID) return generateStoreRegistrySource()
     },
     transform(code, id) {
-      const isSSR = (this as any).environment?.name === 'ssr'
+      const isSSR = hasSSREnvironment(this)
       const cleanId = id.split('?')[0]
       if (!cleanId.match(/\.(js|jsx|ts|tsx)$/) || cleanId.includes('node_modules')) return null
 
